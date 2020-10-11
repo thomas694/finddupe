@@ -10,16 +10,20 @@ I really like finddupe when I look for duplicate files. It is fast and clever. T
 Please refer to [Matthias' site](https://www.sentex.ca/~mwandel/finddupe/) for full description. My favourites are
 `finddupe -bat d:\ImageLibray\Hardlinks_to_be_created.bat -ref d:\ImageLibray\originals1\** -ref d:\ImageLibray\originals2\** d:\ImageLibray\**\*.jpg` to remove duplicates in an image collection and `finddupe -listlink d:\ImageLibray` to list them.
 
-However, Matthias' current version 1.23 is not supporting my requirements.
+However, Matthias' current version 1.23 is not supporting my requirements. And it is ASCII-only and fails on non-ASCII filenames, as is often the case nowadays.
 
 ## Enhancements
-I enhanced finddupe to support my requirements of having multiple reference directories that shall not be touched. It works for me, but some more testing is desirable.
+I added the following features to finddupe:
+- multiple reference directories that shall not be touched (v1.24)
+- unicode support (v1.25)
+
+It works for me, but some more testing is desirable.
 
 I used Visual Studio 2010 for building.
 
 ## Usage
 ```
-finddupe v1.24 compiled May 28 2017
+finddupe v1.25 compiled Jun 4 2017
 Usage: finddupe [options] [-ref] <filepat> [filepat]...
 Options:
  -bat <file.bat> Create batch file with commands to do the hard
