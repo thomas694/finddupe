@@ -1,13 +1,34 @@
 //--------------------------------------------------------------------------
+// finddupe - duplicate file detector and eliminator
+// 
 // Find duplicate files and hard link, delete, or write batch files to do the same.
 // Also includes a separate option to scan for and enumerate hardlinks in the search space.
 //
 // Version 1.23
 // 
 // Matthias Wandel Oct 2006 - Aug 2010
+// 
+// Version 1.24
+// Copyright (C) May 2017  thomas694 (@GH 0CFD61744DA1A21C)
+//     added support for multiple ref patterns
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //--------------------------------------------------------------------------
 
-#define VERSION "1.23"
+#define VERSION "1.24"
+
+#define REF_CODE
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -53,6 +74,12 @@ typedef struct {
 static FileData_t * FileData;
 static int NumAllocated;
 static int NumUnique;
+
+#ifdef REF_CODE
+char* * PathData;
+int PathAllocated;
+int PathUnique;
+#endif
 
 // Duplicate statistics summary
 struct {
@@ -300,6 +327,37 @@ dont_read:
     return 2;
 }
 
+#ifdef REF_CODE
+static int IsNonRefPath(char * filename)
+{
+    int i;
+    char * cmpPath;
+        
+    i = strlen(filename)-1;
+    for (i; i >= 0; i--)
+    {
+        if ((int)filename[i] == (int)'\\') break;
+    }
+
+    if (i == 0)
+    {
+        fprintf(stderr, "IsNonRefPath, path without any slash!?");
+        exit(EXIT_FAILURE);
+    }
+
+    cmpPath = malloc(sizeof(char) * (i+2));
+    strncpy(cmpPath, filename, i+1);
+    cmpPath[i+1] = '\0';
+
+    for (i = 0; i < PathUnique; i++)
+    {
+        if (strcmp(cmpPath, PathData[i]) == 0) return 0;
+    }
+
+    return 1;
+}
+#endif
+
 //--------------------------------------------------------------------------
 // Check for duplicates.
 //--------------------------------------------------------------------------
@@ -320,7 +378,11 @@ static void CheckDuplicate(FileData_t ThisFile)
         comp = memcmp(&ThisFile.Checksum, &FileData[Ptr].Checksum, sizeof(Checksum_t));
         if (comp == 0){
             // Check for true duplicate.
+            #ifdef REF_CODE
+            if (!ReferenceFiles && !HardlinkSearchMode && IsNonRefPath(ThisFile.FileName)){
+            #else
             if (!ReferenceFiles && !HardlinkSearchMode){
+            #endif
                 int r = EliminateDuplicate(ThisFile, FileData[Ptr]);
                 if (r){
                     if (r == 2) FileData[Ptr].NumLinks += 1; // Update link count.
@@ -664,6 +726,16 @@ int main (int argc, char **argv)
         fprintf(stderr, "Malloc failure");
         exit(EXIT_FAILURE);
     }
+
+    #ifdef REF_CODE
+    PathUnique = 0;
+    PathAllocated = 64;
+    PathData = malloc(sizeof(char*)*PathAllocated);
+    if (PathData == NULL){
+        fprintf(stderr, "Malloc failure");
+        exit(EXIT_FAILURE);
+    }
+    #endif
 
     if (BatchFileName){
         BatchFile = fopen(BatchFileName, "w");

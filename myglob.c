@@ -1,4 +1,6 @@
 //--------------------------------------------------------------------------------
+// This file is part of finddupe.
+// 
 // Module to do recursive directory file matching under windows.
 //
 // Tries to do pattern matching to produce similar results as Unix, but using
@@ -8,6 +10,23 @@
 // any levels of subdirectores (ie c:\**\*.c matches ALL .c files on drive c:)
 // 
 // Matthias Wandel Nov 5 2000 - March 2009
+// 
+// Version 1.24
+// Copyright (C) May 2017  thomas694 (@GH 0CFD61744DA1A21C)
+//     added support for multiple ref patterns
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //--------------------------------------------------------------------------------
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,6 +42,14 @@
 #define FALSE 0
 
 //#define DEBUGGING
+#define REF_CODE
+
+#ifdef REF_CODE
+extern char* * PathData;
+extern int PathAllocated;
+extern int PathUnique;
+extern int ReferenceFiles;
+#endif
 
 typedef struct {
     char * Name;
@@ -112,6 +139,9 @@ static void Recurse(const char * Pattern, int FollowReparse, void (*FileFuncParm
     char BasePattern[_MAX_PATH];
     char MatchPattern[_MAX_PATH];
     char PatCopy[_MAX_PATH*2];
+    #ifdef REF_CODE
+    char * refpath;
+    #endif
 
     int a;
     int MatchDirs;
@@ -173,6 +203,23 @@ DoExtraLevel:
 
     #ifdef DEBUGGING
         printf("Base:%s  Pattern:%s dirs:%d\n",BasePattern, MatchPattern, MatchDirs);
+    #endif
+
+    #ifdef REF_CODE
+        if (MatchDirs == 0 && ReferenceFiles) {
+            if (PathUnique >= PathAllocated) {
+                // Array is full.  Make it bigger
+                PathAllocated = PathAllocated + PathAllocated/2;
+                PathData = realloc(PathData, sizeof(char*) * PathAllocated);
+                if (PathData == NULL){
+                    fprintf(stderr, "Malloc failure");
+                    exit(EXIT_FAILURE);
+                }
+            };
+            refpath = strdup(BasePattern);
+            PathData[PathUnique] = refpath;
+            PathUnique += 1;
+        }
     #endif
 
     {
@@ -314,6 +361,16 @@ int main (int argc, char **argv)
 {
     int argn;
     char * arg;
+
+    #ifdef REF_CODE
+    PathUnique = 0;
+    PathAllocated = 64;
+    PathData = malloc(sizeof(char*)*PathAllocated);
+    if (PathData == NULL){
+        fprintf(stderr, "Malloc failure");
+        exit(EXIT_FAILURE);
+    }
+    #endif
 
     for (argn=1;argn<argc;argn++){
         MyGlob(argv[argn], 1, ShowName);
