@@ -1,6 +1,6 @@
 # finddupe
 
-[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0) [![Build status](https://ci.appveyor.com/api/projects/status/nt3tayragwr9qxnr/branch/master?svg=true)](https://ci.appveyor.com/project/thomas694/finddupe/branch/master)
 
 Enhanced version of [finddupe](https://www.sentex.ca/~mwandel/finddupe/), a duplicate file detector and eliminator for Windows, originally by [Matthias Wandel](https://github.com/Matthias-Wandel).
 
@@ -62,5 +62,5 @@ Latest release can be found [here](https://github.com/thomas694/finddupe/release
 ## License <a rel="license" href="https://www.gnu.org/licenses/gpl-3.0"><img alt="GNU GPLv3 license" style="border-width:0" src="https://img.shields.io/badge/License-GPLv3-blue.svg" /></a>
 
 <span xmlns:dct="http://purl.org/dc/terms/" property="dct:title">finddupe</span> by thomas694 
-is licensed under a <a rel="license" href="https://www.gnu.org/licenses/gpl-3.0">GNU GPLv3 license</a>.
+is licensed under <a rel="license" href="https://www.gnu.org/licenses/gpl-3.0">GNU GPLv3</a>.<br/>
 Based on a work at <a xmlns:dct="http://purl.org/dc/terms/" href="https://www.sentex.ca/~mwandel/finddupe/" rel="dct:source">https://www.sentex.ca/~mwandel/finddupe/</a>.
