@@ -634,6 +634,9 @@ cant_read_file:
 static void Usage (void)
 {
     _tprintf(TEXT("finddupe v%s compiled %s\n"), TEXT(VERSION), TEXT(__DATE__));
+    _tprintf(TEXT("an enhanced version by thomas694 (@GH)\n"));
+    _tprintf(TEXT("This program comes with ABSOLUTELY NO WARRANTY. This is free software, and you\n"));
+    _tprintf(TEXT("are welcome to redistribute it under certain conditions; view GNU GPLv3 for more.\n"));
     _tprintf(TEXT("Usage: finddupe [options] [-ref] <filepat> [filepat]...\n"));
     _tprintf(TEXT("Options:\n")
            TEXT(" -bat <file.bat> Create batch file with commands to do the hard\n")

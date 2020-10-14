@@ -1,0 +1,43 @@
+init:
+  - ps: >-
+      if ($env:APPVEYOR_REPO_TAG -eq "true")
+      {
+        $x = $env:APPVEYOR_REPO_TAG_NAME
+        if($x.startswith("v","CurrentCultureIgnoreCase")) { $x = $x.substring(1) }
+        Update-AppveyorBuild -Version "$x"
+        $env:MY_BUILD_VERSION="$x"
+      }
+      else
+      {
+        Update-AppveyorBuild -Version "1.0.$env:APPVEYOR_BUILD_NUMBER"
+      }
+#version: 1.0.{build}
+image: Visual Studio 2019
+configuration: Release
+platform: Win32
+for:
+-
+  branches:
+    only:
+    - master
+-
+  configuration: Release
+
+build:
+  project: finddupe.sln
+  verbosity: normal
+artifacts:
+- path: Release/*.exe
+  name: finddupe
+deploy:
+  release: finddupe-v$(MY_BUILD_VERSION)
+  description: 'Release description'
+  provider: GitHub
+  auth_token:
+    secure: PWzd/WicmutMxrc66FtBXAQMgCUKsX8yjeqv+2SHZyflLOTYZz5393rynVUtCltZ
+  artifact: /.*\.exe/
+  draft: true
+  prerelease: false
+  on:
+    #branch: master                 # release from master branch only
+    APPVEYOR_REPO_TAG: true        # deploy on tag push only

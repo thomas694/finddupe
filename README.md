@@ -19,7 +19,7 @@ I added the following features to finddupe:
 
 It works for me, but some more testing is desirable.
 
-I used Visual Studio 2010 for building.
+I've udated the project to use Visual Studio 2019.
 
 ## Usage
 ```
@@ -49,6 +49,10 @@ Options:
                   **\foo\**    Match any path with component foo
                                 from current directory down
 ```
+
+## Download:
+
+Latest release can be found [here](https://github.com/thomas694/finddupe/releases).
 
 ## Authors
 
