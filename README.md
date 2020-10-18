@@ -16,6 +16,8 @@ However, Matthias' current version 1.23 is not supporting my requirements. And i
 I added the following features to finddupe:
 - multiple reference directories that shall not be touched (v1.24)
 - unicode support (v1.25)
+- alert message if order of options is wrong (v1.26)
+- support for ignoring files by patterns (v1.26)
 
 It works for me, but some more testing is desirable.
 
@@ -23,8 +25,12 @@ I've udated the project to use Visual Studio 2019.
 
 ## Usage
 ```
-finddupe v1.25 compiled Jun 4 2017
-Usage: finddupe [options] [-ref] <filepat> [filepat]...
+finddupe v1.26 compiled Oct 18 2020
+an enhanced version by thomas694 (@GH), originally by Matthias Wandel
+This program comes with ABSOLUTELY NO WARRANTY. This is free software, and you
+are welcome to redistribute it under certain conditions; view GNU GPLv3 for more.
+
+Usage: finddupe [options] [-ign <substr> ...] [-ref <filepat> ...] <filepat>...
 Options:
  -bat <file.bat> Create batch file with commands to do the hard
                  linking.  run batch file afterwards to do it
@@ -34,8 +40,6 @@ Options:
  -v              Verbose
  -sigs           Show signatures calculated based on first 32k for each file
  -rdonly         Apply to readonly files also (as opposed to skipping them)
- -ref <filepat>  Following file pattern are files that are for reference, NOT
-                 to be eliminated, only used to check duplicates against
  -z              Do not skip zero length files (zero length files are ignored
                  by default)
  -u              Do not print a warning for files that cannot be read
@@ -43,6 +47,9 @@ Options:
  -j              Follow NTFS junctions and reparse points (off by default)
  -listlink       hardlink list mode.  Not valid with -del, -bat, -hardlink,
                  or -rdonly, options
+ -ign <substr>   Ignore file pattern, eg. .bak or .tmp (repeatable)
+ -ref <filepat>  Following file pattern are files that are for reference, NOT to
+                 be eliminated, only used to check duplicates against (repeatable)
  filepat         Pattern for files.  Examples:
                   c:\**        Match everything on drive C
                   c:\**\*.jpg  Match only .jpg files on drive C

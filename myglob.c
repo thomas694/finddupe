@@ -1,12 +1,10 @@
 //--------------------------------------------------------------------------------
-// This file is part of finddupe.
-// 
 // Module to do recursive directory file matching under windows.
 //
 // Tries to do pattern matching to produce similar results as Unix, but using
 // the Windows _findfirst to do all the pattern matching.
 //
-// Also hadles recursive directories - "**" path component expands into
+// Also handles recursive directories - "**" path component expands into
 // any levels of subdirectores (ie c:\**\*.c matches ALL .c files on drive c:)
 // 
 // Matthias Wandel Nov 5 2000 - March 2009
@@ -18,7 +16,9 @@
 // Copyright (C) Jun 2017  thomas694
 //     added unicode support
 //
-// This program is free software: you can redistribute it and/or modify
+// This file is part of finddupe.
+//
+// finddupe is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.

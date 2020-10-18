@@ -14,8 +14,11 @@
 // Version 1.25
 // Copyright (C) Jun 2017  thomas694
 //     added unicode support
+// Version 1.26
+// Copyright (C) Oct 2020  thomas694
+//     added support for ignore filename patterns
 //
-// This program is free software: you can redistribute it and/or modify
+// finddupe is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
@@ -29,7 +32,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //--------------------------------------------------------------------------
 
-#define VERSION "1.25"
+#define VERSION "1.26"
 
 #define REF_CODE
 
@@ -42,6 +45,9 @@
 #include <sys/stat.h>
 #include <errno.h>
 #include <ctype.h>
+
+#include <shlwapi.h> /* StrStrI */
+#pragma comment(lib, "shlwapi.lib") /* unresolved external symbol __imp__StrStrIW@8 */
 
 #include <process.h>
 #include <io.h>
@@ -92,6 +98,7 @@ struct {
     int HardlinkGroups;
     int CantReadFiles;
     int ZeroLengthFiles;
+    int IgnoredFiles;
     __int64 TotalBytes;
     __int64 DuplicateBytes;
 }DupeStats;
@@ -116,7 +123,11 @@ int ShowProgress = 1;      // Show progressing file count...
 int HideCantReadMessage= 0;// Hide the can't read file error
 int SkipZeroLength = 1;    // Ignore zero length files.
 int ProgressIndicatorVisible = 0; // Weither a progress indicator needs to be overwritten.
-int FollowReparse = 0;     // Wether to follow reparse points (like unix softlinks for NTFS)
+int FollowReparse = 0;     // Whether to follow reparse points (like unix softlinks for NTFS)
+
+TCHAR* * IgnorePatterns;   // Patterns of filename to ignore (can be repeated, eg. .bak, .tmp)
+int IgnorePatternsAlloc;   // Number of allocated ignore patterns
+int IgnorePatternsCount;   // Number of specified ignore patterns
 
 int MyGlob(const TCHAR * Pattern, int FollowReparse, void (*FileFuncParm)(const TCHAR * FileName));
 
@@ -187,7 +198,7 @@ static int EliminateDuplicate(FileData_t ThisFile, FileData_t DupeOf)
     if (ThisFile.FileSize != DupeOf.FileSize) return 0;
 
     Hardlinked = 0;
-    if (DupeOf.NumLinks && memcmp(&ThisFile.FileIndex, &DupeOf.FileIndex, 8) == 0){
+    if (DupeOf.NumLinks && memcmp(&ThisFile.FileIndex, &DupeOf.FileIndex, sizeof(DupeOf.FileIndex)) == 0){
         Hardlinked = 1;
         goto dont_read;
     }
@@ -368,6 +379,21 @@ static int IsNonRefPath(TCHAR * filename)
 }
 #endif
 
+static void StoreFileData(FileData_t ThisFile)
+{
+    if (NumUnique >= NumAllocated) {
+        // Array is full.  Make it bigger
+        NumAllocated = NumAllocated + NumAllocated / 2;
+        FileData = (FileData_t*)realloc(FileData, sizeof(FileData_t) * NumAllocated);
+        if (FileData == NULL) {
+            fprintf(stderr, "Malloc failure");
+            exit(EXIT_FAILURE);
+        }
+    }
+    FileData[NumUnique] = ThisFile;
+    NumUnique += 1;
+}
+
 //--------------------------------------------------------------------------
 // Check for duplicates.
 //--------------------------------------------------------------------------
@@ -375,28 +401,30 @@ static void CheckDuplicate(FileData_t ThisFile)
 {
     int Ptr;
     int * Link;
-    // Find where in the trie structure it belongs.
+    // Find where in the tree structure it belongs.
     Ptr = 0;
-
-    DupeStats.TotalFiles += 1;
-    DupeStats.TotalBytes += (__int64) ThisFile.FileSize;
 
     if (NumUnique == 0) goto store_it;
 
     for(;;){
         int comp;
         comp = memcmp(&ThisFile.Checksum, &FileData[Ptr].Checksum, sizeof(Checksum_t));
-        if (comp == 0){
+        if (comp == 0) {
+            // the same file
+            if (_tcscmp(ThisFile.FileName, FileData[Ptr].FileName) == 0) {
+                return;
+            }
             // Check for true duplicate.
             #ifdef REF_CODE
-            if (!ReferenceFiles && !HardlinkSearchMode && IsNonRefPath(ThisFile.FileName)){
+            if (!ReferenceFiles && !HardlinkSearchMode && IsNonRefPath(ThisFile.FileName)) {
             #else
-            if (!ReferenceFiles && !HardlinkSearchMode){
+            if (!ReferenceFiles && !HardlinkSearchMode) {
             #endif
                 int r = EliminateDuplicate(ThisFile, FileData[Ptr]);
-                if (r){
+                if (r) {
                     if (r == 2) FileData[Ptr].NumLinks += 1; // Update link count.
-                    // Its a duplicate for elimination.  Do not store info on it.
+                    // Its a duplicate for elimination.  Do not store info on it. New: store info for correct statistic calculation
+                    StoreFileData(ThisFile);
                     return;
                 }
             }
@@ -421,19 +449,12 @@ static void CheckDuplicate(FileData_t ThisFile)
         }
     }
 
+    DupeStats.TotalFiles += 1;
+    DupeStats.TotalBytes += (__int64) ThisFile.FileSize;
+
     store_it:
 
-    if (NumUnique >= NumAllocated){
-        // Array is full.  Make it bigger
-        NumAllocated = NumAllocated + NumAllocated/2;
-        FileData = (FileData_t*) realloc(FileData, sizeof(FileData_t) * NumAllocated);
-        if (FileData == NULL){
-            fprintf(stderr, "Malloc failure");
-            exit(EXIT_FAILURE);
-        }
-    }
-    FileData[NumUnique] = ThisFile;
-    NumUnique += 1;
+    StoreFileData(ThisFile);
 }
 
 //--------------------------------------------------------------------------
@@ -479,9 +500,14 @@ static void ProcessFile(const TCHAR * FileName)
     Checksum_t CheckSum;
     struct _stat FileStat;
 
+    for (int i = 0; i < NumUnique; i++)
+    {
+        if (_tcscmp(FileName, FileData[i].FileName) == 0) 
+            return;
+    }
+
     FileData_t ThisFile;
     memset(&ThisFile, 0, sizeof(ThisFile));
-
     {
         static int LastPrint, Now;
         Now = GetTickCount();
@@ -625,6 +651,18 @@ cant_read_file:
 
     ThisFile.FileName = _tcsdup(FileName); // allocate the string last, so 
                                           // we don't waste memory on errors.
+
+    // skip if filename contains a ignore pattern
+    for (int i = 0; i < IgnorePatternsCount; i++)
+    {
+        if (StrStrI(FileName, IgnorePatterns[i]))
+        {
+            DupeStats.IgnoredFiles++;
+            StoreFileData(ThisFile);
+            return;
+        }
+    }
+
     CheckDuplicate(ThisFile);
 }
 
@@ -634,10 +672,10 @@ cant_read_file:
 static void Usage (void)
 {
     _tprintf(TEXT("finddupe v%s compiled %s\n"), TEXT(VERSION), TEXT(__DATE__));
-    _tprintf(TEXT("an enhanced version by thomas694 (@GH)\n"));
+    _tprintf(TEXT("an enhanced version by thomas694 (@GH), originally by Matthias Wandel\n"));
     _tprintf(TEXT("This program comes with ABSOLUTELY NO WARRANTY. This is free software, and you\n"));
-    _tprintf(TEXT("are welcome to redistribute it under certain conditions; view GNU GPLv3 for more.\n"));
-    _tprintf(TEXT("Usage: finddupe [options] [-ref] <filepat> [filepat]...\n"));
+    _tprintf(TEXT("are welcome to redistribute it under certain conditions; view GNU GPLv3 for more.\n\n"));
+    _tprintf(TEXT("Usage: finddupe [options] [-ign <substr> ...] [-ref <filepat> ...] <filepat>...\n"));
     _tprintf(TEXT("Options:\n")
            TEXT(" -bat <file.bat> Create batch file with commands to do the hard\n")
            TEXT("                 linking.  run batch file afterwards to do it\n")
@@ -647,8 +685,6 @@ static void Usage (void)
            TEXT(" -v              Verbose\n")
            TEXT(" -sigs           Show signatures calculated based on first 32k for each file\n")
            TEXT(" -rdonly         Apply to readonly files also (as opposed to skipping them)\n")
-           TEXT(" -ref <filepat>  Following file pattern are files that are for reference, NOT\n")
-           TEXT("                 to be eliminated, only used to check duplicates against\n")
            TEXT(" -z              Do not skip zero length files (zero length files are ignored\n")
            TEXT("                 by default)\n")
            TEXT(" -u              Do not print a warning for files that cannot be read\n")
@@ -656,6 +692,9 @@ static void Usage (void)
            TEXT(" -j              Follow NTFS junctions and reparse points (off by default)\n")
            TEXT(" -listlink       hardlink list mode.  Not valid with -del, -bat, -hardlink,\n")
            TEXT("                 or -rdonly, options\n")
+           TEXT(" -ign <substr>   Ignore file pattern, eg. .bak or .tmp (repeatable)\n")
+           TEXT(" -ref <filepat>  Following file pattern are files that are for reference, NOT to\n")
+           TEXT("                 be eliminated, only used to check duplicates against (repeatable)\n")
            TEXT(" filepat         Pattern for files.  Examples:\n")
            TEXT("                  c:\\**        Match everything on drive C\n")
            TEXT("                  c:\\**\\*.jpg  Match only .jpg files on drive C\n")
@@ -675,11 +714,23 @@ int _tmain (int argc, TCHAR **argv)
     TCHAR * arg;
     TCHAR DefaultDrive;
     TCHAR DriveUsed = '\0';
+    int indexFirstRef = 0;
     
     PrintDuplicates = 0;
     PrintFileSigs = 0;
     HardlinkSearchMode = 0;
     Verbose = 0;
+
+    for (argn = 1; argn < argc; argn++) {
+        arg = argv[argn];
+        if (indexFirstRef == 0 && !_tcscmp(arg, TEXT("-ref"))) indexFirstRef = argn;
+        if (indexFirstRef > 0 && (!_tcscmp(arg, TEXT("-bat")) || !_tcscmp(arg, TEXT("-v")) || !_tcscmp(arg, TEXT("-sigs")) || !_tcscmp(arg, TEXT("-hardlink")) ||
+            !_tcscmp(arg, TEXT("-del")) || !_tcscmp(arg, TEXT("-rdonly")) || !_tcscmp(arg, TEXT("-listlink")) || !_tcscmp(arg, TEXT("-z")) ||
+            !_tcscmp(arg, TEXT("-u")) || !_tcscmp(arg, TEXT("-p")) || !_tcscmp(arg, TEXT("-j")) || !_tcscmp(arg, TEXT("-ign"))) && argn > indexFirstRef) {
+            fprintf(stderr, "Wrong order of options!  Use -h for help\n");
+            exit(EXIT_FAILURE);
+        }
+    }
 
     for (argn=1;argn<argc;argn++){
         arg = argv[argn];
@@ -716,6 +767,19 @@ int _tmain (int argc, TCHAR **argv)
             ShowProgress = 0;
         }else if (!_tcscmp(arg,TEXT("-j"))){
             FollowReparse = 1;
+        }
+        else if (!_tcscmp(arg, TEXT("-ign"))) {
+            if (IgnorePatternsCount >= IgnorePatternsAlloc) {
+                // Array is full.  Make it bigger
+                IgnorePatternsAlloc = IgnorePatternsAlloc + 4;
+                IgnorePatterns = realloc(IgnorePatterns, sizeof(TCHAR*) * IgnorePatternsAlloc);
+                if (IgnorePatterns == NULL) {
+                    _ftprintf(stderr, TEXT("Malloc failure"));
+                    exit(EXIT_FAILURE);
+                }
+            };
+            TCHAR* substr = _tcsdup(argv[++argn]);
+            IgnorePatterns[IgnorePatternsCount++] = substr;
         }else{
             _tprintf(TEXT("Argument '%s' not understood.  Use -h for help.\n"), arg);
             exit(-1);
@@ -837,12 +901,15 @@ int _tmain (int argc, TCHAR **argv)
         ClearProgressInd();
         _tprintf(TEXT("\n"));
         _tprintf(TEXT("Files: %8u kBytes in %5d files\n"), 
-                (unsigned)(DupeStats.TotalBytes/1000), DupeStats.TotalFiles);
+                (unsigned)(DupeStats.TotalBytes/1024), DupeStats.TotalFiles);
         _tprintf(TEXT("Dupes: %8u kBytes in %5d files\n"), 
-                (unsigned)(DupeStats.DuplicateBytes/1000), DupeStats.DuplicateFiles);
+                (unsigned)(DupeStats.DuplicateBytes/1024), DupeStats.DuplicateFiles);
     }
     if (DupeStats.ZeroLengthFiles){
         _tprintf(TEXT("  %d files of zero length were skipped\n"), DupeStats.ZeroLengthFiles);
+    }
+    if (DupeStats.IgnoredFiles) {
+        _tprintf(TEXT("  %d files were ignored\n"), DupeStats.IgnoredFiles);
     }
     if (DupeStats.CantReadFiles){
         _tprintf(TEXT("  %d files could not be opened\n"), DupeStats.CantReadFiles);
