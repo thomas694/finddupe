@@ -565,7 +565,7 @@ static void ProcessFile(const TCHAR * FileName)
         FileHandle = CreateFile(FileName, 
                         GENERIC_READ,         // dwDesiredAccess
                         FILE_SHARE_READ,      // dwShareMode
-                        NULL,                 // Security attirbutes
+                        NULL,                 // Security attributes
                         OPEN_EXISTING,        // dwCreationDisposition
                         FILE_ATTRIBUTE_NORMAL,// dwFlagsAndAttributes.  Ignored for opening existing files
                         NULL);                // hTemplateFile.  Ignored for existing.
@@ -705,6 +705,29 @@ static void Usage (void)
     exit(EXIT_FAILURE);
 }
 
+static void CheckFileSystem(TCHAR drive)
+{
+    if (!(BatchFileName || MakeHardLinks)) return;
+
+    TCHAR lpRootPathName[4];
+    _tcsncpy(lpRootPathName, TEXT("C:\\\0"), 4);
+    _tcsncpy(lpRootPathName, &drive, 1);
+    TCHAR lpFileSystemNameBuffer[MAX_PATH + 1];
+    #ifdef UNICODE
+    wmemset(lpFileSystemNameBuffer, L' ', sizeof(lpFileSystemNameBuffer) / sizeof(lpFileSystemNameBuffer[0]));
+    BOOL ret = GetVolumeInformationW(lpRootPathName, NULL, 0, 0, 0, 0, lpFileSystemNameBuffer, MAX_PATH + 1);
+    #else
+    memset(lpFileSystemNameBuffer, ' ', sizeof(lpFileSystemNameBuffer));
+    BOOL ret = GetVolumeInformationW(lpRootPathName, NULL, 0, 0, 0, 0, lpFileSystemNameBuffer, MAX_PATH + 1);
+    #endif
+    if (_tcscmp(lpFileSystemNameBuffer, TEXT("NTFS")))
+    {
+        if (ProgressIndicatorVisible) ClearProgressInd();
+        _ftprintf(stderr, TEXT("finddupe can only make hardlinks on NTFS filesystems\n"));
+        exit(EXIT_FAILURE);
+    }
+}
+
 //--------------------------------------------------------------------------
 // The main program.
 //--------------------------------------------------------------------------
@@ -727,7 +750,7 @@ int _tmain (int argc, TCHAR **argv)
         if (indexFirstRef > 0 && (!_tcscmp(arg, TEXT("-bat")) || !_tcscmp(arg, TEXT("-v")) || !_tcscmp(arg, TEXT("-sigs")) || !_tcscmp(arg, TEXT("-hardlink")) ||
             !_tcscmp(arg, TEXT("-del")) || !_tcscmp(arg, TEXT("-rdonly")) || !_tcscmp(arg, TEXT("-listlink")) || !_tcscmp(arg, TEXT("-z")) ||
             !_tcscmp(arg, TEXT("-u")) || !_tcscmp(arg, TEXT("-p")) || !_tcscmp(arg, TEXT("-j")) || !_tcscmp(arg, TEXT("-ign"))) && argn > indexFirstRef) {
-            fprintf(stderr, "Wrong order of options!  Use -h for help\n");
+            _ftprintf(stderr, TEXT("Wrong order of options!  Use -h for help\n"));
             exit(EXIT_FAILURE);
         }
     }
@@ -797,7 +820,7 @@ int _tmain (int argc, TCHAR **argv)
     }
 
     if (HardlinkSearchMode){
-        if (BatchFileName || MakeHardLinks || DelDuplicates || DoReadonly || BatchFileName){
+        if (BatchFileName || MakeHardLinks || DelDuplicates || DoReadonly){
             fprintf(stderr, "listlink option is not valid with any other"
                 " options other than -v\n");            
             exit(EXIT_FAILURE);
@@ -838,6 +861,7 @@ int _tmain (int argc, TCHAR **argv)
         TCHAR CurrentDir[_MAX_PATH];
         _tgetcwd(CurrentDir, _MAX_PATH);
         DefaultDrive = tolower(CurrentDir[0]);
+        CheckFileSystem(DefaultDrive);
     }
 
     for (;argn<argc;argn++){
@@ -869,6 +893,16 @@ int _tmain (int argc, TCHAR **argv)
                 _ftprintf(stderr, TEXT("Error: Hardlinking across different drives not possible\n"));
                 return EXIT_FAILURE;
             }
+        }
+
+        if (_tcslen(argv[argn]) >= 2 && argv[argn][0] == '\\' && argv[argn][1] == '\\' && (BatchFileName || MakeHardLinks))
+        {
+            if (ProgressIndicatorVisible) ClearProgressInd();
+            _ftprintf(stderr, TEXT("Cannot make hardlinks on network shares\n"));
+            return EXIT_FAILURE;
+        }
+        else if (_tcslen(argv[argn]) >= 3 && argv[argn][1] == ':' && argv[argn][2] == '\\') {
+            CheckFileSystem(argv[argn][0]);
         }
 
         // Use my globbing module to do fancier wildcard expansion with recursive
