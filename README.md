@@ -18,6 +18,7 @@ I added the following features to finddupe:
 - unicode support (v1.25)
 - alert message if order of options is wrong (v1.26)
 - support for ignoring files by patterns (v1.26)
+- checking for NTFS file system in batch and hardlink mode (v1.27)
 
 It works for me, but some more testing is desirable.
 
