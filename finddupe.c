@@ -63,6 +63,15 @@
 
 static int FilesMatched;
 
+int totalCompare = 0;
+int totalPrint = 0;
+int totalFileStat = 0;
+int totalFileInfo = 0;
+int totalByteRead = 0;
+int totalCRC = 0;
+int totalCheck = 0;
+int ticksCheck = 0;
+
 typedef struct {
     unsigned int Crc;
     unsigned int Sum;
@@ -124,6 +133,7 @@ int HideCantReadMessage= 0;// Hide the can't read file error
 int SkipZeroLength = 1;    // Ignore zero length files.
 int ProgressIndicatorVisible = 0; // Weither a progress indicator needs to be overwritten.
 int FollowReparse = 0;     // Whether to follow reparse points (like unix softlinks for NTFS)
+int MeasureDurations = 0;  // Measure how many ticks the different tasks take
 
 TCHAR* * IgnorePatterns;   // Patterns of filename to ignore (can be repeated, eg. .bak, .tmp)
 int IgnorePatternsAlloc;   // Number of allocated ignore patterns
@@ -406,12 +416,15 @@ static void CheckDuplicate(FileData_t ThisFile)
 
     if (NumUnique == 0) goto store_it;
 
+    if (MeasureDurations) ticksCheck = GetTickCount();
+
     for(;;){
         int comp;
         comp = memcmp(&ThisFile.Checksum, &FileData[Ptr].Checksum, sizeof(Checksum_t));
         if (comp == 0) {
             // the same file
             if (_tcscmp(ThisFile.FileName, FileData[Ptr].FileName) == 0) {
+                if (MeasureDurations) { ticksCheck = GetTickCount() - ticksCheck; totalCheck += ticksCheck; }
                 return;
             }
             // Check for true duplicate.
@@ -424,6 +437,7 @@ static void CheckDuplicate(FileData_t ThisFile)
                 if (r) {
                     if (r == 2) FileData[Ptr].NumLinks += 1; // Update link count.
                     // Its a duplicate for elimination.  Do not store info on it. New: store info for correct statistic calculation
+                    if (MeasureDurations) { ticksCheck = GetTickCount() - ticksCheck; totalCheck += ticksCheck; }
                     StoreFileData(ThisFile);
                     return;
                 }
@@ -448,6 +462,8 @@ static void CheckDuplicate(FileData_t ThisFile)
             }
         }
     }
+
+    if (MeasureDurations) { ticksCheck = GetTickCount() - ticksCheck; totalCheck += ticksCheck; }
 
     DupeStats.TotalFiles += 1;
     DupeStats.TotalBytes += (__int64) ThisFile.FileSize;
@@ -499,12 +515,22 @@ static void ProcessFile(const TCHAR * FileName)
     unsigned FileSize;
     Checksum_t CheckSum;
     struct _stat FileStat;
+    int ticksCompare = 0;
+    int ticksPrint = 0;
+    int ticksFileStat = 0;
+    int ticksFileInfo = 0;
+    int ticksByteRead = 0;
+    int ticksCRC = 0;
+
+    if (MeasureDurations) ticksCompare = GetTickCount();
 
     for (int i = 0; i < NumUnique; i++)
     {
         if (_tcscmp(FileName, FileData[i].FileName) == 0) 
             return;
     }
+
+    if (MeasureDurations) { ticksCompare = GetTickCount() - ticksCompare; totalCompare += ticksCompare; }
 
     FileData_t ThisFile;
     memset(&ThisFile, 0, sizeof(ThisFile));
@@ -535,6 +561,7 @@ static void ProcessFile(const TCHAR * FileName)
                 ProgressIndicatorVisible = 1;
             }
             fflush(stdout);
+            if (MeasureDurations) { ticksPrint = GetTickCount() - Now; totalPrint += ticksPrint; }
         }
     }
 
@@ -542,11 +569,15 @@ static void ProcessFile(const TCHAR * FileName)
 
     if (BatchFileName && _tcscmp(FileName, BatchFileName) == 0) return;
 
+    if (MeasureDurations) ticksFileStat = GetTickCount();
+
     if (_tstat(FileName, &FileStat) != 0){
         // oops!
         goto cant_read_file;
     }
     FileSize = FileStat.st_size;
+
+    if (MeasureDurations) { ticksFileStat = GetTickCount() - ticksFileStat; totalFileStat += ticksFileStat; }
 
     if (FileSize == 0){
         if (SkipZeroLength){
@@ -560,6 +591,7 @@ static void ProcessFile(const TCHAR * FileName)
     ThisFile.FileSize = FileSize;
 
     {
+        if (MeasureDurations) ticksFileInfo = GetTickCount();
         HANDLE FileHandle;
         BY_HANDLE_FILE_INFORMATION FileInfo;
         FileHandle = CreateFile(FileName, 
@@ -582,6 +614,8 @@ cant_read_file:
         GetFileInformationByHandle(FileHandle, &FileInfo);
 
         CloseHandle(FileHandle);
+
+        if (MeasureDurations) { ticksFileInfo = GetTickCount() - ticksFileInfo; totalFileInfo += ticksFileInfo; }
 
         if (Verbose){
             ClearProgressInd();
@@ -615,6 +649,8 @@ cant_read_file:
         unsigned BytesRead, BytesToRead;
         memset(&CheckSum, 0, sizeof(CheckSum));
 
+        if (MeasureDurations) ticksByteRead = GetTickCount();
+
         infile = _tfopen(FileName, TEXT("rb"));
 
         if (infile == NULL) {
@@ -635,9 +671,13 @@ cant_read_file:
             }
             return;
         }
+        fclose(infile);
+
+        if (MeasureDurations) { ticksByteRead = GetTickCount() - ticksByteRead; totalByteRead += ticksByteRead; ticksCRC = GetTickCount(); }
 
         CalcCrc(&CheckSum, FileBuffer, BytesRead);
-        fclose(infile);
+        
+        if (MeasureDurations) { ticksCRC = GetTickCount() - ticksCRC; totalCRC += ticksCRC; }
 
         CheckSum.Sum += FileSize;
         if (PrintFileSigs){
@@ -664,6 +704,11 @@ cant_read_file:
     }
 
     CheckDuplicate(ThisFile);
+
+    if (MeasureDurations)
+        _tprintf(TEXT("Cmp: %d / %d Print: %d / %d FS: %d / %d FI: %d / %d BR: %d / %d CRC: %d / %d CHK: %d / %d  =  %d\n"),
+            ticksCompare, totalCompare, ticksPrint, totalPrint, ticksFileStat, totalFileStat, ticksFileInfo, totalFileInfo, ticksByteRead, totalByteRead, ticksCRC, totalCRC, ticksCheck, totalCheck,
+            (totalCompare + totalPrint + totalFileStat + totalFileInfo + totalByteRead + totalCRC + totalCheck));
 }
 
 //--------------------------------------------------------------------------
