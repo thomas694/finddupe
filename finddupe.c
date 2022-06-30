@@ -514,7 +514,7 @@ static void ProcessFile(const TCHAR * FileName)
 {
     unsigned FileSize;
     Checksum_t CheckSum;
-    struct _stat FileStat;
+    //struct _stat FileStat;
     int ticksCompare = 0;
     int ticksPrint = 0;
     int ticksFileStat = 0;
@@ -569,6 +569,7 @@ static void ProcessFile(const TCHAR * FileName)
 
     if (BatchFileName && _tcscmp(FileName, BatchFileName) == 0) return;
 
+    /*
     if (MeasureDurations) ticksFileStat = GetTickCount();
 
     if (_tstat(FileName, &FileStat) != 0){
@@ -589,10 +590,26 @@ static void ProcessFile(const TCHAR * FileName)
     ThisFile.Larger = -1;
     ThisFile.Smaller = -1;
     ThisFile.FileSize = FileSize;
+    */
 
+    ThisFile.FileName = _tcsdup(FileName); // allocate the string last, so 
+                                      // we don't waste memory on errors.
+
+    // skip if filename contains a ignore pattern
+    for (int i = 0; i < IgnorePatternsCount; i++)
+    {
+        if (StrStrI(FileName, IgnorePatterns[i]))
+        {
+            DupeStats.IgnoredFiles++;
+            StoreFileData(ThisFile);
+            return;
+        }
+    }
+
+    HANDLE FileHandle;
     {
         if (MeasureDurations) ticksFileInfo = GetTickCount();
-        HANDLE FileHandle;
+
         BY_HANDLE_FILE_INFORMATION FileInfo;
         FileHandle = CreateFile(FileName, 
                         GENERIC_READ,         // dwDesiredAccess
@@ -613,7 +630,7 @@ cant_read_file:
 
         GetFileInformationByHandle(FileHandle, &FileInfo);
 
-        CloseHandle(FileHandle);
+        //CloseHandle(FileHandle);
 
         if (MeasureDurations) { ticksFileInfo = GetTickCount() - ticksFileInfo; totalFileInfo += ticksFileInfo; }
 
@@ -625,6 +642,7 @@ cant_read_file:
 
         if (HardlinkSearchMode && FileInfo.nNumberOfLinks == 1){
             // File has only one link, so its not hardlinked.  Skip for hardlink search mode.
+            CloseHandle(FileHandle);
             return;
         }
 
@@ -634,6 +652,20 @@ cant_read_file:
         ThisFile.FileIndex.Low      = FileInfo.nFileIndexLow;
         ThisFile.FileIndex.High     = FileInfo.nFileIndexHigh;
         ThisFile.NumLinks = FileInfo.nNumberOfLinks;
+        ThisFile.Larger = -1;
+        ThisFile.Smaller = -1;
+        ULARGE_INTEGER ul;
+        ul.HighPart = FileInfo.nFileSizeHigh;
+        ul.LowPart = FileInfo.nFileSizeLow;
+        ThisFile.FileSize = ul.QuadPart;
+
+        if (ThisFile.FileSize == 0) {
+            if (SkipZeroLength) {
+                DupeStats.ZeroLengthFiles += 1;
+                CloseHandle(FileHandle);
+                return;
+            }
+        }
 
         if (HardlinkSearchMode){
             // For hardlink search mode, duplicates are detected by file index, not CRC,
@@ -688,7 +720,12 @@ cant_read_file:
         ThisFile.Checksum = CheckSum;
         ThisFile.FileSize = FileSize;
     }
+    else
+    {
+        CloseHandle(FileHandle);
+    }
 
+    /*
     ThisFile.FileName = _tcsdup(FileName); // allocate the string last, so 
                                           // we don't waste memory on errors.
 
@@ -702,6 +739,7 @@ cant_read_file:
             return;
         }
     }
+    */
 
     CheckDuplicate(ThisFile);
 
