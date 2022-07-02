@@ -81,6 +81,7 @@
     <ClCompile Include="myglob.c" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="khash.h" />
     <ClInclude Include="resource.h" />
     <ClInclude Include="version.h" />
   </ItemGroup>

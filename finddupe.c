@@ -17,6 +17,10 @@
 // Version 1.26
 // Copyright (C) Oct 2020  thomas694
 //     added support for ignore filename patterns
+// Version 1.27  (c) Oct 2020  thomas694
+//     file system checks (batch and hardlink mode)
+// Version 1.28  (c) Jul 2022  thomas694
+//     performance optimizations (especially for very large amounts of files)
 //
 // finddupe is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -32,7 +36,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //--------------------------------------------------------------------------
 
-#define VERSION "1.26"
+#define VERSION "1.28"
 
 #define REF_CODE
 
@@ -57,20 +61,22 @@
 #include <windows.h>
 #include <direct.h>
 
+#include "khash.h"
+KHASH_SET_INIT_INT64(hset)
+
 #define  S_IWUSR  0x80      // user has write permission
 #define  S_IWGRP  0x10      // group has write permission
 #define  S_IWOTH  0x02      // others have write permisson
 
 static int FilesMatched;
 
-int totalCompare = 0;
-int totalPrint = 0;
-int totalFileStat = 0;
-int totalFileInfo = 0;
-int totalByteRead = 0;
-int totalCRC = 0;
-int totalCheck = 0;
-int ticksCheck = 0;
+DWORD totalCompare;
+DWORD totalPrint;
+DWORD totalFileInfo;
+DWORD totalByteRead;
+DWORD totalCRC;
+DWORD totalCheck;
+DWORD ticksCheck;
 
 typedef struct {
     unsigned int Crc;
@@ -93,6 +99,7 @@ typedef struct {
 static FileData_t * FileData;
 static int NumAllocated;
 static int NumUnique;
+static khash_t(hset) * FilenameSet;
 
 #ifdef REF_CODE
 TCHAR* * PathData;
@@ -389,7 +396,22 @@ static int IsNonRefPath(TCHAR * filename)
 }
 #endif
 
-static void StoreFileData(FileData_t ThisFile)
+static INT64 CalcFilenameCRC(TCHAR * filename)
+{
+    size_t len = _tcslen(filename);
+    char* charFileName = (char*)malloc(len * 2);
+    size_t numCharConverted;
+    wcstombs_s(&numCharConverted, charFileName, len * 2, filename, len);
+
+    Checksum_t checkSum = { .Crc = 0, .Sum = 0 };
+    CalcCrc(&checkSum, charFileName, numCharConverted);
+    free(charFileName);
+
+    INT64 crc = (INT64)(((UINT64)checkSum.Crc) << 32 | ((UINT64)checkSum.Sum));
+    return crc;
+}
+
+static void StoreFileData(FileData_t ThisFile, INT64 filenameCRC)
 {
     if (NumUnique >= NumAllocated) {
         // Array is full.  Make it bigger
@@ -402,12 +424,24 @@ static void StoreFileData(FileData_t ThisFile)
     }
     FileData[NumUnique] = ThisFile;
     NumUnique += 1;
+
+    if (filenameCRC == 0)
+        filenameCRC = CalcFilenameCRC(ThisFile.FileName);
+
+    int ret;
+    khint_t key = kh_put(hset, FilenameSet, filenameCRC, &ret);
+    if (!ret) {
+        kh_del(hset, FilenameSet, key);
+        fprintf(stderr, "error storing new file entry");
+        kh_destroy(hset, FilenameSet);
+        exit(EXIT_FAILURE);
+    }
 }
 
 //--------------------------------------------------------------------------
 // Check for duplicates.
 //--------------------------------------------------------------------------
-static void CheckDuplicate(FileData_t ThisFile)
+static void CheckDuplicate(FileData_t ThisFile, INT64 filenameCRC)
 {
     int Ptr;
     int * Link;
@@ -438,7 +472,7 @@ static void CheckDuplicate(FileData_t ThisFile)
                     if (r == 2) FileData[Ptr].NumLinks += 1; // Update link count.
                     // Its a duplicate for elimination.  Do not store info on it. New: store info for correct statistic calculation
                     if (MeasureDurations) { ticksCheck = GetTickCount() - ticksCheck; totalCheck += ticksCheck; }
-                    StoreFileData(ThisFile);
+                    StoreFileData(ThisFile, filenameCRC);
                     return;
                 }
             }
@@ -470,7 +504,7 @@ static void CheckDuplicate(FileData_t ThisFile)
 
     store_it:
 
-    StoreFileData(ThisFile);
+    StoreFileData(ThisFile, filenameCRC);
 }
 
 //--------------------------------------------------------------------------
@@ -514,20 +548,20 @@ static void ProcessFile(const TCHAR * FileName)
 {
     unsigned FileSize;
     Checksum_t CheckSum;
-    //struct _stat FileStat;
-    int ticksCompare = 0;
-    int ticksPrint = 0;
-    int ticksFileStat = 0;
-    int ticksFileInfo = 0;
-    int ticksByteRead = 0;
-    int ticksCRC = 0;
+    DWORD ticksCompare = 0;
+    DWORD ticksPrint = 0;
+    DWORD ticksFileInfo = 0;
+    DWORD ticksByteRead = 0;
+    DWORD ticksCRC = 0;
 
     if (MeasureDurations) ticksCompare = GetTickCount();
 
-    for (int i = 0; i < NumUnique; i++)
+    // replace linear list search with hashset lookup
+    INT64 crc = CalcFilenameCRC(FileName);
+    khiter_t k = kh_get(hset, FilenameSet, crc);
+    if (k != kh_end(FilenameSet))
     {
-        if (_tcscmp(FileName, FileData[i].FileName) == 0) 
-            return;
+        return;
     }
 
     if (MeasureDurations) { ticksCompare = GetTickCount() - ticksCompare; totalCompare += ticksCompare; }
@@ -569,31 +603,7 @@ static void ProcessFile(const TCHAR * FileName)
 
     if (BatchFileName && _tcscmp(FileName, BatchFileName) == 0) return;
 
-    /*
-    if (MeasureDurations) ticksFileStat = GetTickCount();
-
-    if (_tstat(FileName, &FileStat) != 0){
-        // oops!
-        goto cant_read_file;
-    }
-    FileSize = FileStat.st_size;
-
-    if (MeasureDurations) { ticksFileStat = GetTickCount() - ticksFileStat; totalFileStat += ticksFileStat; }
-
-    if (FileSize == 0){
-        if (SkipZeroLength){
-            DupeStats.ZeroLengthFiles += 1;
-            return;
-        }
-    }
-
-    ThisFile.Larger = -1;
-    ThisFile.Smaller = -1;
-    ThisFile.FileSize = FileSize;
-    */
-
-    ThisFile.FileName = _tcsdup(FileName); // allocate the string last, so 
-                                      // we don't waste memory on errors.
+    // removed stat function was only used for getting file size, so use below FS access
 
     // skip if filename contains a ignore pattern
     for (int i = 0; i < IgnorePatternsCount; i++)
@@ -601,7 +611,8 @@ static void ProcessFile(const TCHAR * FileName)
         if (StrStrI(FileName, IgnorePatterns[i]))
         {
             DupeStats.IgnoredFiles++;
-            StoreFileData(ThisFile);
+            ThisFile.FileName = _tcsdup(FileName);
+            StoreFileData(ThisFile, crc);
             return;
         }
     }
@@ -657,9 +668,10 @@ cant_read_file:
         ULARGE_INTEGER ul;
         ul.HighPart = FileInfo.nFileSizeHigh;
         ul.LowPart = FileInfo.nFileSizeLow;
-        ThisFile.FileSize = ul.QuadPart;
+        FileSize = ul.QuadPart;
+        ThisFile.FileSize = FileSize;
 
-        if (ThisFile.FileSize == 0) {
+        if (FileSize == 0) {
             if (SkipZeroLength) {
                 DupeStats.ZeroLengthFiles += 1;
                 CloseHandle(FileHandle);
@@ -676,34 +688,23 @@ cant_read_file:
     }
 
     if (!HardlinkSearchMode){
-        FILE * infile;
         char FileBuffer[BYTES_DO_CHECKSUM_OF];
         unsigned BytesRead, BytesToRead;
         memset(&CheckSum, 0, sizeof(CheckSum));
 
         if (MeasureDurations) ticksByteRead = GetTickCount();
 
-        infile = _tfopen(FileName, TEXT("rb"));
-
-        if (infile == NULL) {
-            if (!HideCantReadMessage){
-                ClearProgressInd();
-                _ftprintf(stderr, TEXT("can't open '%s'\n"), FileName);
-            }
-            return;
-        }
-    
         BytesToRead = FileSize;
         if (BytesToRead > BYTES_DO_CHECKSUM_OF) BytesToRead = BYTES_DO_CHECKSUM_OF;
-        BytesRead = fread(FileBuffer, 1, BytesToRead, infile);
-        if (BytesRead != BytesToRead){
-            if (!HideCantReadMessage){
+        BOOL ret = ReadFile(FileHandle, FileBuffer, BytesToRead, &BytesRead, NULL);
+        if (!ret) {
+            if (!HideCantReadMessage) {
                 ClearProgressInd();
                 _ftprintf(stderr, TEXT("file read problem on '%s'\n"), FileName);
             }
+            CloseHandle(FileHandle);
             return;
         }
-        fclose(infile);
 
         if (MeasureDurations) { ticksByteRead = GetTickCount() - ticksByteRead; totalByteRead += ticksByteRead; ticksCRC = GetTickCount(); }
 
@@ -718,35 +719,19 @@ cant_read_file:
         }
 
         ThisFile.Checksum = CheckSum;
-        ThisFile.FileSize = FileSize;
     }
-    else
-    {
-        CloseHandle(FileHandle);
-    }
+    CloseHandle(FileHandle);
 
-    /*
     ThisFile.FileName = _tcsdup(FileName); // allocate the string last, so 
                                           // we don't waste memory on errors.
 
-    // skip if filename contains a ignore pattern
-    for (int i = 0; i < IgnorePatternsCount; i++)
-    {
-        if (StrStrI(FileName, IgnorePatterns[i]))
-        {
-            DupeStats.IgnoredFiles++;
-            StoreFileData(ThisFile);
-            return;
-        }
+    CheckDuplicate(ThisFile, crc);
+
+    if (MeasureDurations) {
+        _tprintf(TEXT("Cmp: %d / %d Print: %d / %d FS: 0 / 0 FI: %d / %d BR: %d / %d CRC: %d / %d CHK: %d / %d  =  %d\n"),
+            ticksCompare, totalCompare, ticksPrint, totalPrint, ticksFileInfo, totalFileInfo, ticksByteRead, totalByteRead, ticksCRC, totalCRC, ticksCheck, totalCheck,
+            (totalCompare + totalPrint + totalFileInfo + totalByteRead + totalCRC + totalCheck));
     }
-    */
-
-    CheckDuplicate(ThisFile);
-
-    if (MeasureDurations)
-        _tprintf(TEXT("Cmp: %d / %d Print: %d / %d FS: %d / %d FI: %d / %d BR: %d / %d CRC: %d / %d CHK: %d / %d  =  %d\n"),
-            ticksCompare, totalCompare, ticksPrint, totalPrint, ticksFileStat, totalFileStat, ticksFileInfo, totalFileInfo, ticksByteRead, totalByteRead, ticksCRC, totalCRC, ticksCheck, totalCheck,
-            (totalCompare + totalPrint + totalFileStat + totalFileInfo + totalByteRead + totalCRC + totalCheck));
 }
 
 //--------------------------------------------------------------------------
@@ -947,6 +932,8 @@ int _tmain (int argc, TCHAR **argv)
         CheckFileSystem(DefaultDrive);
     }
 
+    FilenameSet = kh_init(hset);
+
     for (;argn<argc;argn++){
         int a;
         TCHAR Drive;
@@ -974,6 +961,7 @@ int _tmain (int argc, TCHAR **argv)
         if (DriveUsed != Drive){
             if (MakeHardLinks){
                 _ftprintf(stderr, TEXT("Error: Hardlinking across different drives not possible\n"));
+                kh_destroy(hset, FilenameSet);
                 return EXIT_FAILURE;
             }
         }
@@ -982,6 +970,7 @@ int _tmain (int argc, TCHAR **argv)
         {
             if (ProgressIndicatorVisible) ClearProgressInd();
             _ftprintf(stderr, TEXT("Cannot make hardlinks on network shares\n"));
+            kh_destroy(hset, FilenameSet);
             return EXIT_FAILURE;
         }
         else if (_tcslen(argv[argn]) >= 3 && argv[argn][1] == ':' && argv[argn][2] == '\\') {
@@ -996,6 +985,8 @@ int _tmain (int argc, TCHAR **argv)
             _ftprintf(stderr, TEXT("Error: No files matched '%s'\n"), argv[argn]);
         }
     }
+
+    kh_destroy(hset, FilenameSet);
 
     if (HardlinkSearchMode){
         ClearProgressInd();
