@@ -62,7 +62,6 @@
 #include <direct.h>
 
 #include "khash.h"
-KHASH_SET_INIT_INT64(hset)
 
 #define  S_IWUSR  0x80      // user has write permission
 #define  S_IWGRP  0x10      // group has write permission
@@ -82,6 +81,8 @@ typedef struct {
     unsigned int Crc;
     unsigned int Sum;
 }Checksum_t;
+
+KHASH_MAP_INIT_INT64(hset, Checksum_t)
 
 // Data structure for file allcoations:
 typedef struct {
@@ -196,21 +197,64 @@ TCHAR * EscapeBatchName(TCHAR * Name)
     return EscName;
 }
 
+static INT64 CalcFilenameCRC(TCHAR* filename)
+{
+    size_t len = _tcslen(filename);
+    char* charFileName = (char*)malloc(len * 2);
+    size_t numCharConverted;
+    wcstombs_s(&numCharConverted, charFileName, len * 2, filename, len);
+
+    Checksum_t checkSum = { .Crc = 0, .Sum = 0 };
+    CalcCrc(&checkSum, charFileName, numCharConverted);
+    free(charFileName);
+
+    INT64 crc = (INT64)(((UINT64)checkSum.Crc) << 32 | ((UINT64)checkSum.Sum));
+    return crc;
+}
+
+static khiter_t kh_get_(INT64 filenameCRC, int createNew, int* created)
+{
+    khint_t k = kh_get(hset, FilenameSet, filenameCRC);
+    if (createNew && k == kh_end(FilenameSet))
+    {
+        *created = 1;
+        k = kh_put_(filenameCRC);
+    }
+    else
+        *created = 0;
+    return k;
+}
+
+static khiter_t kh_put_(INT64 filenameCRC)
+{
+    int ret;
+    khint_t k = kh_put(hset, FilenameSet, filenameCRC, &ret);
+    if (ret == -1) {
+        fprintf(stderr, "error storing new file entry");
+        kh_destroy(hset, FilenameSet);
+        exit(EXIT_FAILURE);
+    }
+    if (ret == 0) return k;
+
+    Checksum_t chk = { 0 };
+    kh_value(FilenameSet, k) = chk;
+    return k;
+}
+
 //--------------------------------------------------------------------------
 // Eliminate duplicates.
 //--------------------------------------------------------------------------
 static int EliminateDuplicate(FileData_t ThisFile, FileData_t DupeOf)
 {
     // First compare whole file.  If mismatch, return 0.
-    #define CHUNK_SIZE 0x10000
-    FILE * File1, * File2;
-    unsigned BytesLeft;
-    unsigned BytesToRead;
-    char Buf1[CHUNK_SIZE], Buf2[CHUNK_SIZE];
-    int IsDuplicate = 1;
+    int IsDuplicate = 0;
+    int IsError = 0;
     int Hardlinked = 0;
     int IsReadonly;
     struct _stat FileStat;
+    int doCalc1 = 0, doCalc2 = 0;
+    Checksum_t chk1 = { .Crc = 0,.Sum = 0 };
+    Checksum_t chk2 = { .Crc = 0,.Sum = 0 };
 
     if (ThisFile.FileSize != DupeOf.FileSize) return 0;
 
@@ -220,51 +264,38 @@ static int EliminateDuplicate(FileData_t ThisFile, FileData_t DupeOf)
         goto dont_read;
     }
 
-    if (DupeOf.NumLinks >= 1023){
+    if (DupeOf.NumLinks >= 1023) {
         // Do not link more than 1023 files onto one physical file (windows limit)
         return 0;
     }
 
-    File1 = _tfopen(ThisFile.FileName, TEXT("rb"));
-    if (File1 == NULL){
-        return 0;
+    INT64 fnCRC1, fnCRC2;
+    fnCRC1 = CalcFilenameCRC(ThisFile.FileName);
+    fnCRC2 = CalcFilenameCRC(DupeOf.FileName);
+
+    khint_t k1 = kh_get_(fnCRC1, 1, &doCalc1);
+    if (!doCalc1) {
+        chk1 = kh_value(FilenameSet, k1);
+        if (chk1.Crc == 0) doCalc1 = 1;
     }
-    File2 = _tfopen(DupeOf.FileName, TEXT("rb"));
-    if (File2 == NULL){
-        fclose(File1);
-        return 0;
-    }
-
-    BytesLeft = ThisFile.FileSize;
-
-    while(BytesLeft){
-        BytesToRead = BytesLeft;
-        if (BytesToRead > CHUNK_SIZE) BytesToRead = CHUNK_SIZE;
-
-        if (fread(Buf1, 1, BytesToRead, File1) != BytesToRead){
-            ClearProgressInd();
-            _ftprintf(stderr, TEXT("Error doing full file read on '%s'\n"), ThisFile.FileName);
-            IsDuplicate = 0;
-            break;
-        }
-
-        if (fread(Buf2, 1, BytesToRead, File2) != BytesToRead){
-            ClearProgressInd();
-            _ftprintf(stderr, TEXT("Error doing full file read on '%s'\n"), DupeOf.FileName);
-            IsDuplicate = 0;
-            break;
-        }
-
-        BytesLeft -= BytesToRead;
-
-        if (memcmp(Buf1, Buf2, BytesToRead)){
-            IsDuplicate = 0;
-            break;
-        }
+    khint_t k2 = kh_get_(fnCRC2, 1, &doCalc2);
+    if (!doCalc2) {
+        chk2 = kh_value(FilenameSet, k2);
+        if (chk2.Crc == 0) doCalc2 = 1;
     }
 
-    fclose(File1);
-    fclose(File2);
+    if (doCalc1 || doCalc2)
+    {
+        if (doCalc1 && !ReadFileAndCalculateCRC(ThisFile.FileName, ThisFile.FileSize, &chk1)) return 0;
+        if (doCalc2 && !ReadFileAndCalculateCRC(DupeOf.FileName, DupeOf.FileSize, &chk2)) return 0;
+
+        if (doCalc1) kh_value(FilenameSet, k1) = chk1;
+        if (doCalc2) kh_value(FilenameSet, k2) = chk2;
+    }
+    //if (!doCalc1) chk1 = kh_value(FilenameSet, k1);
+    //if (!doCalc2) chk2 = kh_value(FilenameSet, k2);
+
+    if (memcmp(&chk1, &chk2, sizeof(Checksum_t)) == 0) IsDuplicate = 1;
 
     if (!IsDuplicate){
         // Full file duplicate check failed (CRC collision, or differs only after 32k)
@@ -286,7 +317,6 @@ dont_read:
             }
         }
     }
-
 
     if (_tstat(ThisFile.FileName, &FileStat) != 0){
         // oops!
@@ -365,6 +395,44 @@ dont_read:
     return 2;
 }
 
+static int ReadFileAndCalculateCRC(TCHAR* fileName, int fileSize, Checksum_t* checksum)
+{
+    #define CHUNK_SIZE 0x10000
+    FILE * File;
+    unsigned BytesLeft;
+    unsigned BytesToRead;
+    char Buf[CHUNK_SIZE];
+    int IsError = 0;
+
+    File = _tfopen(fileName, TEXT("rb"));
+    if (File == NULL) {
+        return 0;
+    }
+    memset(checksum, 0, sizeof(Checksum_t));
+
+    BytesLeft = fileSize;
+
+    while (BytesLeft) {
+        BytesToRead = BytesLeft;
+        if (BytesToRead > CHUNK_SIZE) BytesToRead = CHUNK_SIZE;
+
+        if (fread(Buf, 1, BytesToRead, File) != BytesToRead) {
+            ClearProgressInd();
+            _ftprintf(stderr, TEXT("Error doing full file read on '%s'\n"), fileName);
+            IsError = 1;
+            break;
+        }
+
+        CalcCrc(checksum, Buf, BytesToRead);
+
+        BytesLeft -= BytesToRead;
+    }
+
+    fclose(File);
+    
+    return !IsError;
+}
+
 #ifdef REF_CODE
 static int IsNonRefPath(TCHAR * filename)
 {
@@ -396,21 +464,6 @@ static int IsNonRefPath(TCHAR * filename)
 }
 #endif
 
-static INT64 CalcFilenameCRC(TCHAR * filename)
-{
-    size_t len = _tcslen(filename);
-    char* charFileName = (char*)malloc(len * 2);
-    size_t numCharConverted;
-    wcstombs_s(&numCharConverted, charFileName, len * 2, filename, len);
-
-    Checksum_t checkSum = { .Crc = 0, .Sum = 0 };
-    CalcCrc(&checkSum, charFileName, numCharConverted);
-    free(charFileName);
-
-    INT64 crc = (INT64)(((UINT64)checkSum.Crc) << 32 | ((UINT64)checkSum.Sum));
-    return crc;
-}
-
 static void StoreFileData(FileData_t ThisFile, INT64 filenameCRC)
 {
     if (NumUnique >= NumAllocated) {
@@ -428,14 +481,7 @@ static void StoreFileData(FileData_t ThisFile, INT64 filenameCRC)
     if (filenameCRC == 0)
         filenameCRC = CalcFilenameCRC(ThisFile.FileName);
 
-    int ret;
-    khint_t key = kh_put(hset, FilenameSet, filenameCRC, &ret);
-    if (!ret) {
-        kh_del(hset, FilenameSet, key);
-        fprintf(stderr, "error storing new file entry");
-        kh_destroy(hset, FilenameSet);
-        exit(EXIT_FAILURE);
-    }
+    kh_put_(filenameCRC);
 }
 
 //--------------------------------------------------------------------------
@@ -558,7 +604,8 @@ static void ProcessFile(const TCHAR * FileName)
 
     // replace linear list search with hashset lookup
     INT64 crc = CalcFilenameCRC(FileName);
-    khiter_t k = kh_get(hset, FilenameSet, crc);
+    int created;
+    khiter_t k = kh_get_(crc, 0, &created);
     if (k != kh_end(FilenameSet))
     {
         return;
