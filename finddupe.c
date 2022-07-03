@@ -20,6 +20,7 @@
 // Version 1.27  (c) Oct 2020  thomas694
 //     file system checks (batch and hardlink mode)
 // Version 1.28  (c) Jul 2022  thomas694
+//     fixed bug (divided hardlink groups) in original listlink functionality
 //     performance optimizations (especially for very large amounts of files)
 //
 // finddupe is free software: you can redistribute it and/or modify
@@ -83,8 +84,9 @@ typedef struct {
 }Checksum_t;
 
 KHASH_MAP_INIT_INT64(hset, Checksum_t)
+KHASH_MAP_INIT_INT64(hmap, INT32)
 
-// Data structure for file allcoations:
+// Data structure for file allocations:
 typedef struct {
     Checksum_t Checksum;
     struct {
@@ -101,6 +103,7 @@ static FileData_t * FileData;
 static int NumAllocated;
 static int NumUnique;
 static khash_t(hset) * FilenameSet;
+static khash_t(hmap) * FileDataMap;
 
 #ifdef REF_CODE
 TCHAR* * PathData;
@@ -212,25 +215,25 @@ static INT64 CalcFilenameCRC(TCHAR* filename)
     return crc;
 }
 
-static khiter_t kh_get_(INT64 filenameCRC, int createNew, int* created)
+static khiter_t kh_get_fn(INT64 filenameCRC, int createNew, int* created)
 {
     khint_t k = kh_get(hset, FilenameSet, filenameCRC);
     if (createNew && k == kh_end(FilenameSet))
     {
         *created = 1;
-        k = kh_put_(filenameCRC);
+        k = kh_put_fn(filenameCRC);
     }
     else
         *created = 0;
     return k;
 }
 
-static khiter_t kh_put_(INT64 filenameCRC)
+static khiter_t kh_put_fn(INT64 filenameCRC)
 {
     int ret;
     khint_t k = kh_put(hset, FilenameSet, filenameCRC, &ret);
     if (ret == -1) {
-        fprintf(stderr, "error storing new file entry");
+        fprintf(stderr, "error storing new filename entry");
         kh_destroy(hset, FilenameSet);
         exit(EXIT_FAILURE);
     }
@@ -238,6 +241,34 @@ static khiter_t kh_put_(INT64 filenameCRC)
 
     Checksum_t chk = { 0 };
     kh_value(FilenameSet, k) = chk;
+    return k;
+}
+
+static khiter_t kh_get_fd(INT64 fileSize, int createNew, int* found)
+{
+    khint_t k = kh_get(hmap, FileDataMap, fileSize);
+    if (k == kh_end(FileDataMap))
+    {
+        *found = 0;
+        if (createNew) k = kh_put_fd(fileSize);
+    }
+    else
+        *found = 1;
+    return k;
+}
+
+static khiter_t kh_put_fd(INT64 fileSize)
+{
+    int ret;
+    khint_t k = kh_put(hmap, FileDataMap, fileSize, &ret);
+    if (ret == -1) {
+        fprintf(stderr, "error storing new file entry");
+        kh_destroy(hmap, FileDataMap);
+        exit(EXIT_FAILURE);
+    }
+    if (ret == 0) return k;
+
+    kh_value(FileDataMap, k) = -1;
     return k;
 }
 
@@ -273,12 +304,12 @@ static int EliminateDuplicate(FileData_t ThisFile, FileData_t DupeOf)
     fnCRC1 = CalcFilenameCRC(ThisFile.FileName);
     fnCRC2 = CalcFilenameCRC(DupeOf.FileName);
 
-    khint_t k1 = kh_get_(fnCRC1, 1, &doCalc1);
+    khint_t k1 = kh_get_fn(fnCRC1, 1, &doCalc1);
     if (!doCalc1) {
         chk1 = kh_value(FilenameSet, k1);
         if (chk1.Crc == 0) doCalc1 = 1;
     }
-    khint_t k2 = kh_get_(fnCRC2, 1, &doCalc2);
+    khint_t k2 = kh_get_fn(fnCRC2, 1, &doCalc2);
     if (!doCalc2) {
         chk2 = kh_value(FilenameSet, k2);
         if (chk2.Crc == 0) doCalc2 = 1;
@@ -466,6 +497,11 @@ static int IsNonRefPath(TCHAR * filename)
 
 static void StoreFileData(FileData_t ThisFile, INT64 filenameCRC)
 {
+    int found;
+    khiter_t k = kh_get_fd(ThisFile.FileSize, 1, &found);
+    if (!found)
+        kh_value(FileDataMap, k) = NumUnique;
+
     if (NumUnique >= NumAllocated) {
         // Array is full.  Make it bigger
         NumAllocated = NumAllocated + NumAllocated / 2;
@@ -481,7 +517,7 @@ static void StoreFileData(FileData_t ThisFile, INT64 filenameCRC)
     if (filenameCRC == 0)
         filenameCRC = CalcFilenameCRC(ThisFile.FileName);
 
-    kh_put_(filenameCRC);
+    kh_put_fn(filenameCRC);
 }
 
 //--------------------------------------------------------------------------
@@ -489,17 +525,25 @@ static void StoreFileData(FileData_t ThisFile, INT64 filenameCRC)
 //--------------------------------------------------------------------------
 static void CheckDuplicate(FileData_t ThisFile, INT64 filenameCRC)
 {
-    int Ptr;
+    int Ptr, prevPtr = -1;
     int * Link;
     // Find where in the tree structure it belongs.
     Ptr = 0;
 
-    if (NumUnique == 0) goto store_it;
-
     if (MeasureDurations) ticksCheck = GetTickCount();
 
+    if (NumUnique == 0) goto store_it;
+
+    int found;
+    khiter_t k = kh_get_fd(ThisFile.FileSize, 0, &found);
+    if (found)
+        Ptr = kh_value(FileDataMap, k);
+    else
+        goto store_it;
+
+    int comp = 0, oldComp;
     for(;;){
-        int comp;
+        oldComp = comp;
         comp = memcmp(&ThisFile.Checksum, &FileData[Ptr].Checksum, sizeof(Checksum_t));
         if (comp == 0) {
             // the same file
@@ -517,19 +561,29 @@ static void CheckDuplicate(FileData_t ThisFile, INT64 filenameCRC)
                 if (r) {
                     if (r == 2) FileData[Ptr].NumLinks += 1; // Update link count.
                     // Its a duplicate for elimination.  Do not store info on it. New: store info for correct statistic calculation
-                    if (MeasureDurations) { ticksCheck = GetTickCount() - ticksCheck; totalCheck += ticksCheck; }
-                    StoreFileData(ThisFile, filenameCRC);
-                    return;
+                    goto store_it;
                 }
             }
             // Build a chain on one side of the branch.
             // That way, we will check every checksum collision from here on.
-            comp = 1;
+            // Mark that we are on chain with equal checksums
+            comp = 2;
+        }
+        else if (oldComp == 2) {
+            // Insert it at the chain end before the next higher checksum so that the branch keeps sorted
+            comp = 3;
         }
 
         if (comp){
             if (comp > 0){
-                Link = &FileData[Ptr].Larger;
+                if (comp == 3)
+                {
+                    FileData[prevPtr].Larger = NumUnique;
+                    ThisFile.Larger = Ptr;
+                    break;
+                }
+                else
+                    Link = &FileData[Ptr].Larger;
             }else{
                 Link = &FileData[Ptr].Smaller;
             }
@@ -538,17 +592,18 @@ static void CheckDuplicate(FileData_t ThisFile, INT64 filenameCRC)
                 *Link = NumUnique;
                 break;
             }else{
+                prevPtr = Ptr;
                 Ptr = *Link;
             }
         }
     }
 
+    store_it:
+
     if (MeasureDurations) { ticksCheck = GetTickCount() - ticksCheck; totalCheck += ticksCheck; }
 
     DupeStats.TotalFiles += 1;
     DupeStats.TotalBytes += (__int64) ThisFile.FileSize;
-
-    store_it:
 
     StoreFileData(ThisFile, filenameCRC);
 }
@@ -605,7 +660,7 @@ static void ProcessFile(const TCHAR * FileName)
     // replace linear list search with hashset lookup
     INT64 crc = CalcFilenameCRC(FileName);
     int created;
-    khiter_t k = kh_get_(crc, 0, &created);
+    khiter_t k = kh_get_fn(crc, 0, &created);
     if (k != kh_end(FilenameSet))
     {
         return;
@@ -980,6 +1035,7 @@ int _tmain (int argc, TCHAR **argv)
     }
 
     FilenameSet = kh_init(hset);
+    FileDataMap = kh_init(hmap);
 
     for (;argn<argc;argn++){
         int a;
@@ -1009,6 +1065,7 @@ int _tmain (int argc, TCHAR **argv)
             if (MakeHardLinks){
                 _ftprintf(stderr, TEXT("Error: Hardlinking across different drives not possible\n"));
                 kh_destroy(hset, FilenameSet);
+                kh_destroy(hmap, FileDataMap);
                 return EXIT_FAILURE;
             }
         }
@@ -1018,6 +1075,7 @@ int _tmain (int argc, TCHAR **argv)
             if (ProgressIndicatorVisible) ClearProgressInd();
             _ftprintf(stderr, TEXT("Cannot make hardlinks on network shares\n"));
             kh_destroy(hset, FilenameSet);
+            kh_destroy(hmap, FileDataMap);
             return EXIT_FAILURE;
         }
         else if (_tcslen(argv[argn]) >= 3 && argv[argn][1] == ':' && argv[argn][2] == '\\') {
@@ -1039,7 +1097,11 @@ int _tmain (int argc, TCHAR **argv)
         ClearProgressInd();
         _tprintf(TEXT("\n"));
         DupeStats.HardlinkGroups = 0;
-        WalkTree(0,-1,0);
+        // get tree roots for each file size and walk it
+        khint_t k;
+        for (k = kh_begin(FileDataMap); k != kh_end(FileDataMap); ++k)
+            if (kh_exist(FileDataMap, k))
+                WalkTree(kh_value(FileDataMap, k), -1, 0);
         _tprintf(TEXT("\nNumber of hardlink groups found: %d\n"), DupeStats.HardlinkGroups);
     }else{
         if (DupeStats.TotalFiles == 0){
@@ -1069,6 +1131,8 @@ int _tmain (int argc, TCHAR **argv)
     if (DupeStats.CantReadFiles){
         _tprintf(TEXT("  %d files could not be opened\n"), DupeStats.CantReadFiles);
     }
+
+    kh_destroy(hmap, FileDataMap);
 
     return EXIT_SUCCESS;
 }
