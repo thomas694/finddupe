@@ -523,23 +523,25 @@ static void StoreFileData(FileData_t ThisFile, INT64 filenameCRC)
 //--------------------------------------------------------------------------
 // Check for duplicates.
 //--------------------------------------------------------------------------
-static void CheckDuplicate(FileData_t ThisFile, INT64 filenameCRC)
+static void CheckDuplicate(int Ptr, FileData_t ThisFile, INT64 filenameCRC)
 {
-    int Ptr, prevPtr = -1;
+    int prevPtr = -1;
     int * Link;
     // Find where in the tree structure it belongs.
-    Ptr = 0;
+    //Ptr = 0;
 
     if (MeasureDurations) ticksCheck = GetTickCount();
 
-    if (NumUnique == 0) goto store_it;
+    if (NumUnique == 0 || Ptr == -1) goto store_it;
 
+    /*
     int found;
     khiter_t k = kh_get_fd(ThisFile.FileSize, 0, &found);
     if (found)
         Ptr = kh_value(FileDataMap, k);
     else
         goto store_it;
+    */
 
     int comp = 0, oldComp;
     for(;;){
@@ -642,10 +644,68 @@ not_end:
     }
 }
 
+Checksum_t ReadFileAndCalculateCRC32KB(HANDLE FileHandle, const TCHAR* FileName, int FileSize)
+{
+    Checksum_t CheckSum;
+    char FileBuffer[BYTES_DO_CHECKSUM_OF];
+    unsigned BytesRead, BytesToRead;
+    memset(&CheckSum, 0, sizeof(CheckSum));
+
+    int ticksByteRead, ticksCRC;
+    if (MeasureDurations) ticksByteRead = GetTickCount();
+
+    BytesToRead = FileSize;
+    if (BytesToRead > BYTES_DO_CHECKSUM_OF) BytesToRead = BYTES_DO_CHECKSUM_OF;
+    BOOL ret = ReadFile(FileHandle, FileBuffer, BytesToRead, &BytesRead, NULL);
+    if (!ret) {
+        if (!HideCantReadMessage) {
+            ClearProgressInd();
+            _ftprintf(stderr, TEXT("file read problem on '%s'\n"), FileName);
+        }
+        CloseHandle(FileHandle);
+        return;
+    }
+
+    if (MeasureDurations) { ticksByteRead = GetTickCount() - ticksByteRead; totalByteRead += ticksByteRead; ticksCRC = GetTickCount(); }
+
+    CalcCrc(&CheckSum, FileBuffer, BytesRead);
+
+    if (MeasureDurations) { ticksCRC = GetTickCount() - ticksCRC; totalCRC += ticksCRC; }
+
+    CheckSum.Sum += FileSize;
+    if (PrintFileSigs) {
+        ClearProgressInd();
+        _tprintf(TEXT("%08x%08x %10d %s\n"), CheckSum.Crc, CheckSum.Sum, FileSize, FileName);
+    }
+
+    return CheckSum;
+}
+
+BOOL OpenTheFile(const TCHAR* FileName, HANDLE* FileHandle)
+{
+    *FileHandle = CreateFile(FileName,
+        GENERIC_READ,         // dwDesiredAccess
+        FILE_SHARE_READ,      // dwShareMode
+        NULL,                 // Security attributes
+        OPEN_EXISTING,        // dwCreationDisposition
+        FILE_ATTRIBUTE_NORMAL,// dwFlagsAndAttributes.  Ignored for opening existing files
+        NULL);                // hTemplateFile.  Ignored for existing.
+    if (*FileHandle == (void*)-1) {
+    cant_read_file:
+        DupeStats.CantReadFiles += 1;
+        if (!HideCantReadMessage) {
+            ClearProgressInd();
+            _ftprintf(stderr, TEXT("Could not read '%s'\n"), FileName);
+        }
+        return FALSE;
+    }
+    return TRUE;
+}
+
 //--------------------------------------------------------------------------
 // Do selected operations to one file at a time.
 //--------------------------------------------------------------------------
-static void ProcessFile(const TCHAR * FileName)
+static void ProcessFile(const TCHAR* FileName)
 {
     unsigned FileSize;
     Checksum_t CheckSum;
@@ -724,23 +784,7 @@ static void ProcessFile(const TCHAR * FileName)
         if (MeasureDurations) ticksFileInfo = GetTickCount();
 
         BY_HANDLE_FILE_INFORMATION FileInfo;
-        FileHandle = CreateFile(FileName, 
-                        GENERIC_READ,         // dwDesiredAccess
-                        FILE_SHARE_READ,      // dwShareMode
-                        NULL,                 // Security attributes
-                        OPEN_EXISTING,        // dwCreationDisposition
-                        FILE_ATTRIBUTE_NORMAL,// dwFlagsAndAttributes.  Ignored for opening existing files
-                        NULL);                // hTemplateFile.  Ignored for existing.
-        if (FileHandle == (void *)-1){
-cant_read_file:
-            DupeStats.CantReadFiles += 1;
-            if (!HideCantReadMessage){
-                ClearProgressInd();
-                _ftprintf(stderr, TEXT("Could not read '%s'\n"), FileName);
-            }
-            return;
-        }
-
+        if (!OpenTheFile(FileName, &FileHandle)) return;
         GetFileInformationByHandle(FileHandle, &FileInfo);
 
         //CloseHandle(FileHandle);
@@ -789,45 +833,30 @@ cant_read_file:
         }
     }
 
-    if (!HardlinkSearchMode){
-        char FileBuffer[BYTES_DO_CHECKSUM_OF];
-        unsigned BytesRead, BytesToRead;
-        memset(&CheckSum, 0, sizeof(CheckSum));
+    int Ptr = -1;
+    int found;
+    khiter_t k_fd = kh_get_fd(ThisFile.FileSize, 0, &found);
+    if (found)
+        Ptr = kh_value(FileDataMap, k_fd);
 
-        if (MeasureDurations) ticksByteRead = GetTickCount();
-
-        BytesToRead = FileSize;
-        if (BytesToRead > BYTES_DO_CHECKSUM_OF) BytesToRead = BYTES_DO_CHECKSUM_OF;
-        BOOL ret = ReadFile(FileHandle, FileBuffer, BytesToRead, &BytesRead, NULL);
-        if (!ret) {
-            if (!HideCantReadMessage) {
-                ClearProgressInd();
-                _ftprintf(stderr, TEXT("file read problem on '%s'\n"), FileName);
+    if (!HardlinkSearchMode) {
+        if (found) {
+            if (FileData[Ptr].Checksum.Crc == 0) {
+                HANDLE rootHandle = 0;
+                if (!OpenTheFile(FileData[Ptr].FileName, &rootHandle)) return;
+                FileData[Ptr].Checksum = ReadFileAndCalculateCRC32KB(rootHandle, FileData[Ptr].FileName, FileData[Ptr].FileSize);
+                CloseHandle(rootHandle);
             }
-            CloseHandle(FileHandle);
-            return;
+
+            ThisFile.Checksum = ReadFileAndCalculateCRC32KB(FileHandle, FileName, FileSize);
         }
-
-        if (MeasureDurations) { ticksByteRead = GetTickCount() - ticksByteRead; totalByteRead += ticksByteRead; ticksCRC = GetTickCount(); }
-
-        CalcCrc(&CheckSum, FileBuffer, BytesRead);
-        
-        if (MeasureDurations) { ticksCRC = GetTickCount() - ticksCRC; totalCRC += ticksCRC; }
-
-        CheckSum.Sum += FileSize;
-        if (PrintFileSigs){
-            ClearProgressInd();
-            _tprintf(TEXT("%08x%08x %10d %s\n"), CheckSum.Crc, CheckSum.Sum, FileSize, FileName);
-        }
-
-        ThisFile.Checksum = CheckSum;
     }
     CloseHandle(FileHandle);
 
     ThisFile.FileName = _tcsdup(FileName); // allocate the string last, so 
                                           // we don't waste memory on errors.
 
-    CheckDuplicate(ThisFile, crc);
+    CheckDuplicate(Ptr, ThisFile, crc);
 
     if (MeasureDurations) {
         _tprintf(TEXT("Cmp: %d / %d Print: %d / %d FS: 0 / 0 FI: %d / %d BR: %d / %d CRC: %d / %d CHK: %d / %d  =  %d\n"),
