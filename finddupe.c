@@ -22,6 +22,8 @@
 // Version 1.28  (c) Jul 2022  thomas694
 //     fixed bug (divided hardlink groups) in original listlink functionality
 //     performance optimizations (especially for very large amounts of files)
+// Version 1.29  (c) Aug 2023  thomas694
+//     fixed a problem with large files
 //
 // finddupe is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -37,7 +39,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //--------------------------------------------------------------------------
 
-#define VERSION "1.28"
+#define VERSION "1.29"
 
 #define REF_CODE
 
@@ -94,7 +96,7 @@ typedef struct {
         int Low;
     }FileIndex;    
     int NumLinks; 
-    unsigned FileSize;
+    UINT64 FileSize;
     TCHAR * FileName;
     int Larger; // Child index for larger child
     int Smaller;// Child index for smaller child
@@ -119,8 +121,8 @@ struct {
     int CantReadFiles;
     int ZeroLengthFiles;
     int IgnoredFiles;
-    __int64 TotalBytes;
-    __int64 DuplicateBytes;
+    UINT64 TotalBytes;
+    UINT64 DuplicateBytes;
 }DupeStats;
 
 // How many bytes to calculate file signature of.
@@ -282,7 +284,7 @@ static int EliminateDuplicate(FileData_t ThisFile, FileData_t DupeOf)
     int IsError = 0;
     int Hardlinked = 0;
     int IsReadonly;
-    struct _stat FileStat;
+    struct _stat64 FileStat;
     int doCalc1 = 0, doCalc2 = 0;
     Checksum_t chk1 = { .Crc = 0,.Sum = 0 };
     Checksum_t chk2 = { .Crc = 0,.Sum = 0 };
@@ -349,7 +351,7 @@ dont_read:
         }
     }
 
-    if (_tstat(ThisFile.FileName, &FileStat) != 0){
+    if (_tstat64(ThisFile.FileName, &FileStat) != 0){
         // oops!
         _ftprintf(stderr, TEXT("stat failed on '%s'\n"), ThisFile.FileName);
         exit (EXIT_FAILURE);
@@ -426,12 +428,12 @@ dont_read:
     return 2;
 }
 
-static int ReadFileAndCalculateCRC(TCHAR* fileName, int fileSize, Checksum_t* checksum)
+static int ReadFileAndCalculateCRC(TCHAR* fileName, UINT64 fileSize, Checksum_t* checksum)
 {
     #define CHUNK_SIZE 0x10000
     FILE * File;
-    unsigned BytesLeft;
-    unsigned BytesToRead;
+    UINT64 BytesLeft;
+    size_t BytesToRead;
     char Buf[CHUNK_SIZE];
     int IsError = 0;
 
@@ -444,8 +446,7 @@ static int ReadFileAndCalculateCRC(TCHAR* fileName, int fileSize, Checksum_t* ch
     BytesLeft = fileSize;
 
     while (BytesLeft) {
-        BytesToRead = BytesLeft;
-        if (BytesToRead > CHUNK_SIZE) BytesToRead = CHUNK_SIZE;
+        BytesToRead = (BytesLeft > CHUNK_SIZE) ? CHUNK_SIZE : BytesLeft;
 
         if (fread(Buf, 1, BytesToRead, File) != BytesToRead) {
             ClearProgressInd();
@@ -644,7 +645,7 @@ not_end:
     }
 }
 
-Checksum_t ReadFileAndCalculateCRC32KB(HANDLE FileHandle, const TCHAR* FileName, int FileSize)
+Checksum_t ReadFileAndCalculateCRC32KB(HANDLE FileHandle, const TCHAR* FileName, UINT64 FileSize)
 {
     Checksum_t CheckSum;
     char FileBuffer[BYTES_DO_CHECKSUM_OF];
@@ -654,8 +655,7 @@ Checksum_t ReadFileAndCalculateCRC32KB(HANDLE FileHandle, const TCHAR* FileName,
     int ticksByteRead, ticksCRC;
     if (MeasureDurations) ticksByteRead = GetTickCount();
 
-    BytesToRead = FileSize;
-    if (BytesToRead > BYTES_DO_CHECKSUM_OF) BytesToRead = BYTES_DO_CHECKSUM_OF;
+    BytesToRead = (FileSize > BYTES_DO_CHECKSUM_OF) ? BYTES_DO_CHECKSUM_OF : FileSize;
     BOOL ret = ReadFile(FileHandle, FileBuffer, BytesToRead, &BytesRead, NULL);
     if (!ret) {
         if (!HideCantReadMessage) {
@@ -675,7 +675,7 @@ Checksum_t ReadFileAndCalculateCRC32KB(HANDLE FileHandle, const TCHAR* FileName,
     CheckSum.Sum += FileSize;
     if (PrintFileSigs) {
         ClearProgressInd();
-        _tprintf(TEXT("%08x%08x %10d %s\n"), CheckSum.Crc, CheckSum.Sum, FileSize, FileName);
+        _tprintf(TEXT("%08x%08x %10llu %s\n"), CheckSum.Crc, CheckSum.Sum, FileSize, FileName);
     }
 
     return CheckSum;
@@ -707,7 +707,7 @@ BOOL OpenTheFile(const TCHAR* FileName, HANDLE* FileHandle)
 //--------------------------------------------------------------------------
 static void ProcessFile(const TCHAR* FileName)
 {
-    unsigned FileSize;
+    UINT64 FileSize;
     Checksum_t CheckSum;
     DWORD ticksCompare = 0;
     DWORD ticksPrint = 0;
@@ -938,7 +938,7 @@ int _tmain (int argc, TCHAR **argv)
     TCHAR DriveUsed = '\0';
     int indexFirstRef = 0;
     
-    PrintDuplicates = 0;
+    PrintDuplicates = 1;
     PrintFileSigs = 0;
     HardlinkSearchMode = 0;
     Verbose = 0;
@@ -1146,10 +1146,10 @@ int _tmain (int argc, TCHAR **argv)
         // Print summary data
         ClearProgressInd();
         _tprintf(TEXT("\n"));
-        _tprintf(TEXT("Files: %8u kBytes in %5d files\n"), 
-                (unsigned)(DupeStats.TotalBytes/1024), DupeStats.TotalFiles);
-        _tprintf(TEXT("Dupes: %8u kBytes in %5d files\n"), 
-                (unsigned)(DupeStats.DuplicateBytes/1024), DupeStats.DuplicateFiles);
+        _tprintf(TEXT("Files: %8llu kBytes in %5d files\n"), 
+                (UINT64)(DupeStats.TotalBytes/1024), DupeStats.TotalFiles);
+        _tprintf(TEXT("Dupes: %8llu kBytes in %5d files\n"), 
+                (UINT64)(DupeStats.DuplicateBytes/1024), DupeStats.DuplicateFiles);
     }
     if (DupeStats.ZeroLengthFiles){
         _tprintf(TEXT("  %d files of zero length were skipped\n"), DupeStats.ZeroLengthFiles);
