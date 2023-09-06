@@ -20,6 +20,7 @@ I added the following features to finddupe:
 - support for ignoring files by patterns (v1.26)
 - checking for NTFS file system in batch and hardlink mode (v1.27)
 - performance optimizations (especially for very large amounts of files) (v1.28)
+- new option to skip linked duplicates in output list (v1.30)
 
 It works for me, but some more testing is desirable.
 
@@ -45,6 +46,7 @@ Options:
  -z              Do not skip zero length files (zero length files are ignored
                  by default)
  -u              Do not print a warning for files that cannot be read
+ -sl             Skip linked duplicates and show only unlinked ones
  -p              Hide progress indicator (useful when redirecting to a file)
  -j              Follow NTFS junctions and reparse points (off by default)
  -listlink       hardlink list mode.  Not valid with -del, -bat, -hardlink,

@@ -24,6 +24,8 @@
 //     performance optimizations (especially for very large amounts of files)
 // Version 1.29  (c) Aug 2023  thomas694
 //     fixed a problem with large files
+// Version 1.30  (c) Sep 2023  thomas694
+//     added option to skip linked duplicates in output list
 //
 // finddupe is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -39,7 +41,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //--------------------------------------------------------------------------
 
-#define VERSION "1.29"
+#define VERSION "1.30"
 
 #define REF_CODE
 
@@ -147,6 +149,7 @@ int SkipZeroLength = 1;    // Ignore zero length files.
 int ProgressIndicatorVisible = 0; // Weither a progress indicator needs to be overwritten.
 int FollowReparse = 0;     // Whether to follow reparse points (like unix softlinks for NTFS)
 int MeasureDurations = 0;  // Measure how many ticks the different tasks take
+int SkipLinkedDuplicates = 0; // Skip linked duplicates and show only unlinked ones
 
 TCHAR* * IgnorePatterns;   // Patterns of filename to ignore (can be repeated, eg. .bak, .tmp)
 int IgnorePatternsAlloc;   // Number of allocated ignore patterns
@@ -342,9 +345,11 @@ dont_read:
     if (PrintDuplicates){
         if (!HardlinkSearchMode){
             ClearProgressInd();
-            _tprintf(TEXT("Duplicate: '%s'\n"), DupeOf.FileName);
-            _tprintf(TEXT("With:      '%s'\n"), ThisFile.FileName);
-            if (Hardlinked){
+            if (!(Hardlinked && SkipLinkedDuplicates)) {
+                _tprintf(TEXT("Duplicate: '%s'\n"), DupeOf.FileName);
+                _tprintf(TEXT("With:      '%s'\n"), ThisFile.FileName);
+            }
+            if (Hardlinked && !SkipLinkedDuplicates) {
                 // If the files happen to be hardlinked, show that.
                 _tprintf(TEXT("    (hardlinked instances of same file)\n"));
             }
@@ -887,6 +892,7 @@ static void Usage (void)
            TEXT(" -z              Do not skip zero length files (zero length files are ignored\n")
            TEXT("                 by default)\n")
            TEXT(" -u              Do not print a warning for files that cannot be read\n")
+           TEXT(" -sl             Skip linked duplicates and show only unlinked ones\n")
            TEXT(" -p              Hide progress indicator (useful when redirecting to a file)\n")
            TEXT(" -j              Follow NTFS junctions and reparse points (off by default)\n")
            TEXT(" -listlink       hardlink list mode.  Not valid with -del, -bat, -hardlink,\n")
@@ -947,8 +953,8 @@ int _tmain (int argc, TCHAR **argv)
         arg = argv[argn];
         if (indexFirstRef == 0 && !_tcscmp(arg, TEXT("-ref"))) indexFirstRef = argn;
         if (indexFirstRef > 0 && (!_tcscmp(arg, TEXT("-bat")) || !_tcscmp(arg, TEXT("-v")) || !_tcscmp(arg, TEXT("-sigs")) || !_tcscmp(arg, TEXT("-hardlink")) ||
-            !_tcscmp(arg, TEXT("-del")) || !_tcscmp(arg, TEXT("-rdonly")) || !_tcscmp(arg, TEXT("-listlink")) || !_tcscmp(arg, TEXT("-z")) ||
-            !_tcscmp(arg, TEXT("-u")) || !_tcscmp(arg, TEXT("-p")) || !_tcscmp(arg, TEXT("-j")) || !_tcscmp(arg, TEXT("-ign"))) && argn > indexFirstRef) {
+            !_tcscmp(arg, TEXT("-del")) || !_tcscmp(arg, TEXT("-rdonly")) || !_tcscmp(arg, TEXT("-listlink")) || !_tcscmp(arg, TEXT("-z")) || !_tcscmp(arg, TEXT("-u")) ||
+            !_tcscmp(arg, TEXT("-sl")) || !_tcscmp(arg, TEXT("-p")) || !_tcscmp(arg, TEXT("-j")) || !_tcscmp(arg, TEXT("-ign"))) && argn > indexFirstRef) {
             _ftprintf(stderr, TEXT("Wrong order of options!  Use -h for help\n"));
             exit(EXIT_FAILURE);
         }
@@ -985,6 +991,8 @@ int _tmain (int argc, TCHAR **argv)
             SkipZeroLength = 0;
         }else if (!_tcscmp(arg,TEXT("-u"))){
             HideCantReadMessage = 1;
+        }else if (!_tcscmp(arg,TEXT("-sl"))) {
+            SkipLinkedDuplicates = 1;
         }else if (!_tcscmp(arg,TEXT("-p"))){
             ShowProgress = 0;
         }else if (!_tcscmp(arg,TEXT("-j"))){
@@ -1145,11 +1153,13 @@ int _tmain (int argc, TCHAR **argv)
 
         // Print summary data
         ClearProgressInd();
+        UINT64 totalBytes = ((UINT64)(DupeStats.TotalBytes / 1024) == 0 && DupeStats.TotalBytes > 0) ? 1 : DupeStats.TotalBytes / 1024;
+        UINT64 duplicateBytes = ((UINT64)(DupeStats.DuplicateBytes / 1024) == 0 && DupeStats.DuplicateBytes > 0) ? 1 : DupeStats.DuplicateBytes / 1024;
         _tprintf(TEXT("\n"));
         _tprintf(TEXT("Files: %8llu kBytes in %5d files\n"), 
-                (UINT64)(DupeStats.TotalBytes/1024), DupeStats.TotalFiles);
+                totalBytes, DupeStats.TotalFiles);
         _tprintf(TEXT("Dupes: %8llu kBytes in %5d files\n"), 
-                (UINT64)(DupeStats.DuplicateBytes/1024), DupeStats.DuplicateFiles);
+                duplicateBytes, DupeStats.DuplicateFiles);
     }
     if (DupeStats.ZeroLengthFiles){
         _tprintf(TEXT("  %d files of zero length were skipped\n"), DupeStats.ZeroLengthFiles);
