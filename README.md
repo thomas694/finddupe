@@ -28,7 +28,7 @@ I've udated the project to use Visual Studio 2019.
 
 ## Usage
 ```
-finddupe v1.26 compiled Oct 18 2020
+finddupe v1.30 compiled Sep  6 2023
 an enhanced version by thomas694 (@GH), originally by Matthias Wandel
 This program comes with ABSOLUTELY NO WARRANTY. This is free software, and you
 are welcome to redistribute it under certain conditions; view GNU GPLv3 for more.
