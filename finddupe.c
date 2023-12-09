@@ -1,4 +1,4 @@
-//--------------------------------------------------------------------------
+﻿//--------------------------------------------------------------------------
 // finddupe - duplicate file detector and eliminator
 // 
 // Find duplicate files and hard link, delete, or write batch files to do the same.
@@ -26,6 +26,8 @@
 //     fixed a problem with large files
 // Version 1.30  (c) Sep 2023  thomas694
 //     added option to skip linked duplicates in output list
+// Version 1.31  (c) Dec 2023  thomas694
+//     fixed a problem with non-ASCII characters/code pages
 //
 // finddupe is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -41,10 +43,11 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //--------------------------------------------------------------------------
 
-#define VERSION "1.30"
+#define VERSION "1.31"
 
 #define REF_CODE
 
+#include <locale.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <memory.h>
@@ -154,6 +157,7 @@ int SkipLinkedDuplicates = 0; // Skip linked duplicates and show only unlinked o
 TCHAR* * IgnorePatterns;   // Patterns of filename to ignore (can be repeated, eg. .bak, .tmp)
 int IgnorePatternsAlloc;   // Number of allocated ignore patterns
 int IgnorePatternsCount;   // Number of specified ignore patterns
+UINT m_old_code_page;
 
 int MyGlob(const TCHAR * Pattern, int FollowReparse, void (*FileFuncParm)(const TCHAR * FileName));
 
@@ -207,13 +211,12 @@ TCHAR * EscapeBatchName(TCHAR * Name)
 
 static INT64 CalcFilenameCRC(TCHAR* filename)
 {
-    size_t len = _tcslen(filename);
-    char* charFileName = (char*)malloc(len * 2);
-    size_t numCharConverted;
-    wcstombs_s(&numCharConverted, charFileName, len * 2, filename, len);
+    size_t neededBytes = wcstombs(NULL, filename, 0) + 1;
+    char* charFileName = (char*)malloc(neededBytes);
+    wcstombs(charFileName, filename, neededBytes);
 
     Checksum_t checkSum = { .Crc = 0, .Sum = 0 };
-    CalcCrc(&checkSum, charFileName, numCharConverted);
+    CalcCrc(&checkSum, charFileName, neededBytes);
     free(charFileName);
 
     INT64 crc = (INT64)(((UINT64)checkSum.Crc) << 32 | ((UINT64)checkSum.Sum));
@@ -949,6 +952,10 @@ int _tmain (int argc, TCHAR **argv)
     HardlinkSearchMode = 0;
     Verbose = 0;
 
+    m_old_code_page = GetConsoleOutputCP();
+    SetConsoleOutputCP(CP_UTF8);
+    _tsetlocale(LC_CTYPE, TEXT(".UTF8"));
+
     for (argn = 1; argn < argc; argn++) {
         arg = argv[argn];
         if (indexFirstRef == 0 && !_tcscmp(arg, TEXT("-ref"))) indexFirstRef = argn;
@@ -1172,6 +1179,8 @@ int _tmain (int argc, TCHAR **argv)
     }
 
     kh_destroy(hmap, FileDataMap);
+
+    SetConsoleOutputCP(m_old_code_page);
 
     return EXIT_SUCCESS;
 }
