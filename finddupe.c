@@ -68,6 +68,7 @@
 #define _WIN32_WINNT 0x0500
 #include <windows.h>
 #include <direct.h>
+#include <fcntl.h>
 
 #include "khash.h"
 
@@ -211,13 +212,14 @@ TCHAR * EscapeBatchName(TCHAR * Name)
 
 static INT64 CalcFilenameCRC(TCHAR* filename)
 {
-    size_t neededBytes = wcstombs(NULL, filename, 0) + 1;
-    char* charFileName = (char*)malloc(neededBytes);
-    wcstombs(charFileName, filename, neededBytes);
+    unsigned int len = _tcslen(filename);
+#ifdef UNICODE
+    len = len * 2;
+#endif
+    char* charFileName = (char*)filename;
 
     Checksum_t checkSum = { .Crc = 0, .Sum = 0 };
-    CalcCrc(&checkSum, charFileName, neededBytes);
-    free(charFileName);
+    CalcCrc(&checkSum, charFileName, len);
 
     INT64 crc = (INT64)(((UINT64)checkSum.Crc) << 32 | ((UINT64)checkSum.Sum));
     return crc;
@@ -952,9 +954,11 @@ int _tmain (int argc, TCHAR **argv)
     HardlinkSearchMode = 0;
     Verbose = 0;
 
-    m_old_code_page = GetConsoleOutputCP();
-    SetConsoleOutputCP(CP_UTF8);
     _tsetlocale(LC_CTYPE, TEXT(".UTF8"));
+#ifdef UNICODE
+    _setmode(_fileno(stdout), _O_U16TEXT);
+    _setmode(_fileno(stderr), _O_U16TEXT);
+#endif
 
     for (argn = 1; argn < argc; argn++) {
         arg = argv[argn];
@@ -1179,8 +1183,6 @@ int _tmain (int argc, TCHAR **argv)
     }
 
     kh_destroy(hmap, FileDataMap);
-
-    SetConsoleOutputCP(m_old_code_page);
 
     return EXIT_SUCCESS;
 }
