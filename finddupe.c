@@ -28,6 +28,8 @@
 //     added option to skip linked duplicates in output list
 // Version 1.31  (c) Dec 2023  thomas694
 //     fixed a problem with non-ASCII characters/code pages
+// Version 1.32  (c) Jan 2024  thomas694
+//     fixed a problem with non-ASCII characters/code pages on systems older than Win10
 //
 // finddupe is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -43,7 +45,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //--------------------------------------------------------------------------
 
-#define VERSION "1.31"
+#define VERSION "1.32"
 
 #define REF_CODE
 
@@ -243,7 +245,7 @@ static khiter_t kh_put_fn(INT64 filenameCRC)
     int ret;
     khint_t k = kh_put(hset, FilenameSet, filenameCRC, &ret);
     if (ret == -1) {
-        fprintf(stderr, "error storing new filename entry");
+        _ftprintf(stderr, TEXT("error storing new filename entry"));
         kh_destroy(hset, FilenameSet);
         exit(EXIT_FAILURE);
     }
@@ -272,7 +274,7 @@ static khiter_t kh_put_fd(INT64 fileSize)
     int ret;
     khint_t k = kh_put(hmap, FileDataMap, fileSize, &ret);
     if (ret == -1) {
-        fprintf(stderr, "error storing new file entry");
+        _ftprintf(stderr, TEXT("error storing new file entry"));
         kh_destroy(hmap, FileDataMap);
         exit(EXIT_FAILURE);
     }
@@ -518,7 +520,7 @@ static void StoreFileData(FileData_t ThisFile, INT64 filenameCRC)
         NumAllocated = NumAllocated + NumAllocated / 2;
         FileData = (FileData_t*)realloc(FileData, sizeof(FileData_t) * NumAllocated);
         if (FileData == NULL) {
-            fprintf(stderr, "Malloc failure");
+            _ftprintf(stderr, TEXT("Malloc failure"));
             exit(EXIT_FAILURE);
         }
     }
@@ -813,7 +815,7 @@ static void ProcessFile(const TCHAR* FileName)
             return;
         }
 
-        //printf("    Info:  Index: %08x %08x\n",FileInfo.nFileIndexHigh, FileInfo.nFileIndexLow);
+        //_tprintf(TEXT("    Info:  Index: %08x %08x\n"),FileInfo.nFileIndexHigh, FileInfo.nFileIndexLow);
 
         // Use the file index (which is NTFS equivalent of the iNode) instead of the CRC.
         ThisFile.FileIndex.Low      = FileInfo.nFileIndexLow;
@@ -1028,19 +1030,19 @@ int _tmain (int argc, TCHAR **argv)
     }
 
     if (argn > argc){
-        fprintf(stderr, "Missing argument!  Use -h for help\n");
+        _ftprintf(stderr, TEXT("Missing argument!  Use -h for help\n"));
         exit(EXIT_FAILURE);
     }
 
     if (argn == argc){
-        fprintf(stderr, "No files to process.   Use -h for help\n");
+        _ftprintf(stderr, TEXT("No files to process.   Use -h for help\n"));
         exit(EXIT_FAILURE);
     }
 
     if (HardlinkSearchMode){
         if (BatchFileName || MakeHardLinks || DelDuplicates || DoReadonly){
-            fprintf(stderr, "listlink option is not valid with any other"
-                " options other than -v\n");            
+            _ftprintf(stderr, TEXT("listlink option is not valid with any other")
+                TEXT(" options other than -v\n"));
             exit(EXIT_FAILURE);
         }
     }
@@ -1049,7 +1051,7 @@ int _tmain (int argc, TCHAR **argv)
     NumAllocated = 1024;
     FileData = (FileData_t*) malloc(sizeof(FileData_t)*1024);
     if (FileData == NULL){
-        fprintf(stderr, "Malloc failure");
+        _ftprintf(stderr, TEXT("Malloc failure"));
         exit(EXIT_FAILURE);
     }
 
@@ -1058,7 +1060,7 @@ int _tmain (int argc, TCHAR **argv)
     PathAllocated = 64;
     PathData = (TCHAR**) malloc(sizeof(TCHAR*)*PathAllocated);
     if (PathData == NULL){
-        fprintf(stderr, "Malloc failure");
+        _ftprintf(stderr, TEXT("Malloc failure"));
         exit(EXIT_FAILURE);
     }
     #endif
