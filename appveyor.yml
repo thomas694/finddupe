@@ -14,7 +14,9 @@ init:
 #version: 1.0.{build}
 image: Visual Studio 2019
 configuration: Release
-platform: Win32
+platform: 
+  - Win32
+  - x64
 for:
 -
   branches:
@@ -27,7 +29,7 @@ build:
   project: finddupe.sln
   verbosity: normal
 artifacts:
-- path: Release/*.exe
+- path: $(platform)/Release/*.exe
   name: finddupe
 deploy:
   release: finddupe-v$(MY_BUILD_VERSION)

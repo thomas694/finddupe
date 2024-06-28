@@ -240,7 +240,7 @@ DoExtraLevel:
         int NumHave = 0;
         
         struct _tfinddata_t finddata;
-        long find_handle;
+        intptr_t find_handle;
 
         find_handle = _tfindfirst(MatchPattern, &finddata);
 

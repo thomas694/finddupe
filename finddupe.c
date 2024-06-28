@@ -33,6 +33,7 @@
 // Version 1.33  (c) Jun 2024  thomas694
 //     fixed a problem writing filenames with special unicode characters to the batch file
 //     fixed a memory problem with very large amounts of files
+//     added a 64-bit version for addressing more memory
 //
 // finddupe is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -97,7 +98,7 @@ typedef struct {
 }Checksum_t;
 
 KHASH_MAP_INIT_INT64(hset, Checksum_t)
-KHASH_MAP_INIT_INT64(hmap, INT32)
+KHASH_MAP_INIT_INT64(hmap, UINT64)
 
 // Data structure for file allocations:
 typedef struct FileData_t FileData_t;
@@ -262,7 +263,7 @@ static khiter_t kh_put_fn(INT64 filenameCRC)
     return k;
 }
 
-static khiter_t kh_get_fd(INT64 fileSize, int createNew, int* found)
+static khiter_t kh_get_fd(UINT64 fileSize, int createNew, int* found)
 {
     khint_t k = kh_get(hmap, FileDataMap, fileSize);
     if (k == kh_end(FileDataMap))
@@ -275,7 +276,7 @@ static khiter_t kh_get_fd(INT64 fileSize, int createNew, int* found)
     return k;
 }
 
-static khiter_t kh_put_fd(INT64 fileSize)
+static khiter_t kh_put_fd(UINT64 fileSize)
 {
     int ret;
     khint_t k = kh_put(hmap, FileDataMap, fileSize, &ret);
@@ -1107,10 +1108,11 @@ int _tmain (int argc, TCHAR **argv)
     }
     #endif
 
-    if (BatchFileName){
+    if (BatchFileName) {
         BatchFile = _tfopen(BatchFileName, TEXT("w"));
-        if (BatchFile == NULL){
-            _tprintf(TEXT("Unable to open task batch file '%s'\n"), BatchFileName);
+        if (BatchFile == NULL) {
+            _ftprintf(stderr, TEXT("Unable to open task batch file '%s'\n"), BatchFileName);
+            exit(EXIT_FAILURE);
         }
         _ftprintf(BatchFile, TEXT("@echo off\n"));
         _ftprintf(BatchFile, TEXT("REM Batch file for replacing duplicates with hard links\n"));
