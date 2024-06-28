@@ -30,6 +30,8 @@
 //     fixed a problem with non-ASCII characters/code pages
 // Version 1.32  (c) Jan 2024  thomas694
 //     fixed a problem with non-ASCII characters/code pages on systems older than Win10
+// Version 1.33  (c) Jun 2024  thomas694
+//     fixed a problem writing filenames with special unicode characters to the batch file
 //
 // finddupe is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -45,7 +47,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //--------------------------------------------------------------------------
 
-#define VERSION "1.32"
+#define VERSION "1.33"
 
 #define REF_CODE
 
@@ -284,6 +286,33 @@ static khiter_t kh_put_fd(INT64 fileSize)
     return k;
 }
 
+void WriteStringToFile(FILE* file, TCHAR* text) {
+    if (sizeof(TCHAR) == sizeof(char)) {
+        _ftprintf(file, "%s", text);
+    }
+    else {
+        size_t required_size = WideCharToMultiByte(CP_UTF8, 0, text, -1, NULL, 0, NULL, NULL);
+        char* buffer = calloc(required_size, sizeof(char));
+        WideCharToMultiByte(CP_UTF8, 0, text, -1, buffer, required_size, NULL, NULL);
+        fprintf(file, "%s", buffer);
+        free(buffer);
+    }
+}
+
+void ftprintf(FILE* file, TCHAR* format, ...) {
+    va_list _argList;
+    va_start(_argList, format);
+
+    int len = _vsntprintf(NULL, 0, format, _argList);
+    TCHAR* s = calloc(len + 1, sizeof(TCHAR));
+    _vsntprintf(s, len, format, _argList);
+
+    WriteStringToFile(file, s);
+    free(s);
+
+    va_end(_argList);
+}
+
 //--------------------------------------------------------------------------
 // Eliminate duplicates.
 //--------------------------------------------------------------------------
@@ -387,19 +416,19 @@ dont_read:
     if (BatchFile){
         // put command in batch file
         if (DelDuplicates || !Hardlinked)
-            _ftprintf(BatchFile, TEXT("del %s \"%s\"\n"), IsReadonly ? TEXT("/F"):TEXT(""), 
+            ftprintf(BatchFile, TEXT("del %s\"%s\"\n"), (IsReadonly ? TEXT("/F ") : TEXT("")),
                 EscapeBatchName(ThisFile.FileName));
         if (!DelDuplicates){
             if (!Hardlinked){
-                _ftprintf(BatchFile, TEXT("fsutil hardlink create \"%s\" \"%s\"\n"),
+                ftprintf(BatchFile, TEXT("fsutil hardlink create \"%s\" \"%s\"\n"),
                     ThisFile.FileName, DupeOf.FileName);
-            if (IsReadonly){
-                // If original was readonly, restore that attribute
-                    _ftprintf(BatchFile, TEXT("attrib +r \"%s\"\n"), ThisFile.FileName);
-            }
+                if (IsReadonly){
+                    // If original was readonly, restore that attribute
+                    ftprintf(BatchFile, TEXT("attrib +r \"%s\"\n"), ThisFile.FileName);
+                }
             }
         }else{
-            _ftprintf(BatchFile, TEXT("rem duplicate of \"%s\"\n"), DupeOf.FileName);
+            ftprintf(BatchFile, TEXT("rem duplicate of \"%s\"\n"), DupeOf.FileName);
         }
 
     }else if (MakeHardLinks || DelDuplicates){
@@ -501,8 +530,12 @@ static int IsNonRefPath(TCHAR * filename)
 
     for (i = 0; i < PathUnique; i++)
     {
-        if (_tcscmp(cmpPath, PathData[i]) == 0) return 0;
+        if (_tcscmp(cmpPath, PathData[i]) == 0) {
+            free(cmpPath);
+            return 0;
+        }
     }
+    free(cmpPath);
 
     return 1;
 }
@@ -517,7 +550,7 @@ static void StoreFileData(FileData_t ThisFile, INT64 filenameCRC)
 
     if (NumUnique >= NumAllocated) {
         // Array is full.  Make it bigger
-        NumAllocated = NumAllocated + NumAllocated / 2;
+        NumAllocated = NumAllocated + (NumAllocated <= 32768 ? NumAllocated / 2 : 16384);
         FileData = (FileData_t*)realloc(FileData, sizeof(FileData_t) * NumAllocated);
         if (FileData == NULL) {
             _ftprintf(stderr, TEXT("Malloc failure"));
@@ -1072,7 +1105,8 @@ int _tmain (int argc, TCHAR **argv)
         }
         _ftprintf(BatchFile, TEXT("@echo off\n"));
         _ftprintf(BatchFile, TEXT("REM Batch file for replacing duplicates with hard links\n"));
-        _ftprintf(BatchFile, TEXT("REM created by finddupe program\n\n"));
+        _ftprintf(BatchFile, TEXT("REM created by finddupe program\n"));
+        _ftprintf(BatchFile, TEXT("chcp 65001\n\n"));
     }
 
     memset(&DupeStats, 0, sizeof(DupeStats));
