@@ -32,6 +32,7 @@
 //     fixed a problem with non-ASCII characters/code pages on systems older than Win10
 // Version 1.33  (c) Jun 2024  thomas694
 //     fixed a problem writing filenames with special unicode characters to the batch file
+//     fixed a memory problem with very large amounts of files
 //
 // finddupe is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -99,7 +100,8 @@ KHASH_MAP_INIT_INT64(hset, Checksum_t)
 KHASH_MAP_INIT_INT64(hmap, INT32)
 
 // Data structure for file allocations:
-typedef struct {
+typedef struct FileData_t FileData_t;
+struct FileData_t {
     Checksum_t Checksum;
     struct {
         int High;
@@ -108,14 +110,16 @@ typedef struct {
     int NumLinks; 
     UINT64 FileSize;
     TCHAR * FileName;
-    int Larger; // Child index for larger child
-    int Smaller;// Child index for smaller child
-}FileData_t;
+    FileData_t * Larger;    // Child pointer for larger child
+    FileData_t * Smaller;   // Child pointer for smaller child
+};
 static FileData_t * FileData;
 static int NumAllocated;
 static int NumUnique;
 static khash_t(hset) * FilenameSet;
 static khash_t(hmap) * FileDataMap;
+
+#define UNITS_PER_ALLOCATION 102400
 
 #ifdef REF_CODE
 TCHAR* * PathData;
@@ -192,7 +196,7 @@ static void CalcCrc(Checksum_t * Check, char * Data, unsigned NumBytes)
 void ClearProgressInd(void)
 {
     if (ProgressIndicatorVisible){
-        _tprintf(TEXT("                                                                          \r"));
+        _tprintf(TEXT("                                                                             \r"));
         ProgressIndicatorVisible = 0;
     }
 }
@@ -282,7 +286,7 @@ static khiter_t kh_put_fd(INT64 fileSize)
     }
     if (ret == 0) return k;
 
-    kh_value(FileDataMap, k) = -1;
+    kh_value(FileDataMap, k) = NULL;
     return k;
 }
 
@@ -543,22 +547,24 @@ static int IsNonRefPath(TCHAR * filename)
 
 static void StoreFileData(FileData_t ThisFile, INT64 filenameCRC)
 {
-    int found;
-    khiter_t k = kh_get_fd(ThisFile.FileSize, 1, &found);
-    if (!found)
-        kh_value(FileDataMap, k) = NumUnique;
+    int currentIndex = NumUnique % UNITS_PER_ALLOCATION;
 
     if (NumUnique >= NumAllocated) {
-        // Array is full.  Make it bigger
-        NumAllocated = NumAllocated + (NumAllocated <= 32768 ? NumAllocated / 2 : 16384);
-        FileData = (FileData_t*)realloc(FileData, sizeof(FileData_t) * NumAllocated);
+        // Box is full, make a new one
+        NumAllocated += UNITS_PER_ALLOCATION;
+        FileData = (FileData_t*)malloc(sizeof(FileData_t) * UNITS_PER_ALLOCATION);
         if (FileData == NULL) {
             _ftprintf(stderr, TEXT("Malloc failure"));
             exit(EXIT_FAILURE);
         }
     }
-    FileData[NumUnique] = ThisFile;
+    FileData[currentIndex] = ThisFile;
     NumUnique += 1;
+
+    int found;
+    khiter_t k = kh_get_fd(ThisFile.FileSize, 1, &found);
+    if (!found)
+        kh_value(FileDataMap, k) = &FileData[currentIndex];
 
     if (filenameCRC == 0)
         filenameCRC = CalcFilenameCRC(ThisFile.FileName);
@@ -569,16 +575,16 @@ static void StoreFileData(FileData_t ThisFile, INT64 filenameCRC)
 //--------------------------------------------------------------------------
 // Check for duplicates.
 //--------------------------------------------------------------------------
-static void CheckDuplicate(int Ptr, FileData_t ThisFile, INT64 filenameCRC)
+static void CheckDuplicate(FileData_t *Ptr, FileData_t ThisFile, INT64 filenameCRC)
 {
-    int prevPtr = -1;
-    int * Link;
+    FileData_t *prevPtr = NULL;
+    FileData_t * *Link;
     // Find where in the tree structure it belongs.
     //Ptr = 0;
 
     if (MeasureDurations) ticksCheck = GetTickCount();
 
-    if (NumUnique == 0 || Ptr == -1) goto store_it;
+    if (NumUnique == 0 || Ptr == NULL) goto store_it;
 
     /*
     int found;
@@ -590,12 +596,12 @@ static void CheckDuplicate(int Ptr, FileData_t ThisFile, INT64 filenameCRC)
     */
 
     int comp = 0, oldComp;
-    for(;;){
+    for (;;) {
         oldComp = comp;
-        comp = memcmp(&ThisFile.Checksum, &FileData[Ptr].Checksum, sizeof(Checksum_t));
+        comp = memcmp(&ThisFile.Checksum, &Ptr->Checksum, sizeof(Checksum_t));
         if (comp == 0) {
             // the same file
-            if (_tcscmp(ThisFile.FileName, FileData[Ptr].FileName) == 0) {
+            if (_tcscmp(ThisFile.FileName, Ptr->FileName) == 0) {
                 if (MeasureDurations) { ticksCheck = GetTickCount() - ticksCheck; totalCheck += ticksCheck; }
                 return;
             }
@@ -605,9 +611,9 @@ static void CheckDuplicate(int Ptr, FileData_t ThisFile, INT64 filenameCRC)
             #else
             if (!ReferenceFiles && !HardlinkSearchMode) {
             #endif
-                int r = EliminateDuplicate(ThisFile, FileData[Ptr]);
+                int r = EliminateDuplicate(ThisFile, *Ptr);
                 if (r) {
-                    if (r == 2) FileData[Ptr].NumLinks += 1; // Update link count.
+                    if (r == 2) Ptr->NumLinks += 1; // Update link count.
                     // Its a duplicate for elimination.  Do not store info on it. New: store info for correct statistic calculation
                     goto store_it;
                 }
@@ -622,24 +628,25 @@ static void CheckDuplicate(int Ptr, FileData_t ThisFile, INT64 filenameCRC)
             comp = 3;
         }
 
-        if (comp){
-            if (comp > 0){
+        if (comp) {
+            if (comp > 0) {
                 if (comp == 3)
                 {
-                    FileData[prevPtr].Larger = NumUnique;
+                    prevPtr->Larger = FileData + (NumUnique % UNITS_PER_ALLOCATION);
                     ThisFile.Larger = Ptr;
                     break;
                 }
                 else
-                    Link = &FileData[Ptr].Larger;
-            }else{
-                Link = &FileData[Ptr].Smaller;
+                    Link = &Ptr->Larger;
             }
-            if (*Link < 0){
+            else {
+                Link = &Ptr->Smaller;
+            }
+            if (*Link == NULL) {
                 // Link it to here.
-                *Link = NumUnique;
+                *Link = FileData + (NumUnique % UNITS_PER_ALLOCATION);
                 break;
-            }else{
+            } else {
                 prevPtr = Ptr;
                 Ptr = *Link;
             }
@@ -651,7 +658,7 @@ static void CheckDuplicate(int Ptr, FileData_t ThisFile, INT64 filenameCRC)
     if (MeasureDurations) { ticksCheck = GetTickCount() - ticksCheck; totalCheck += ticksCheck; }
 
     DupeStats.TotalFiles += 1;
-    DupeStats.TotalBytes += (__int64) ThisFile.FileSize;
+    DupeStats.TotalBytes += (__int64)ThisFile.FileSize;
 
     StoreFileData(ThisFile, filenameCRC);
 }
@@ -659,34 +666,36 @@ static void CheckDuplicate(int Ptr, FileData_t ThisFile, INT64 filenameCRC)
 //--------------------------------------------------------------------------
 // Walk the file tree after handling detect mode to show linked groups.
 //--------------------------------------------------------------------------
-static void WalkTree(int index, int LinksFirst, int GroupLen)
+static void WalkTree(FileData_t *item, FileData_t *linksFirst, int groupLen)
 {
-    int a,t;
+    int a;
+    FileData_t *t;
 
     if (NumUnique == 0) return;
 
-    if (FileData[index].Larger >= 0){
-        int Larger = FileData[index].Larger;
-        if (memcmp(&FileData[Larger].Checksum, &FileData[index].Checksum, sizeof(Checksum_t)) == 0){
+    if (item->Larger != NULL) {
+        FileData_t *larger = item->Larger;
+        if (memcmp(&larger->Checksum, &item->Checksum, sizeof(Checksum_t)) == 0) {
             // it continues the same group.
-            WalkTree(FileData[index].Larger,LinksFirst >= 0 ? LinksFirst : index, GroupLen+1);
+            WalkTree(item->Larger, linksFirst != NULL ? linksFirst : item, groupLen + 1);
             goto not_end;
-        }else{
-            WalkTree(FileData[index].Larger,-1,0);
+        }
+        else {
+            WalkTree(item->Larger, NULL, 0);
         }
     }
-    _tprintf(TEXT("\nHardlink group, %d of %d hardlinked instances found in search tree:\n"), GroupLen+1, FileData[index].NumLinks);
-    t = LinksFirst >= 0 ? LinksFirst : index;
-    for (a=0;a<=GroupLen;a++){
-        _tprintf(TEXT("  \"%s\"\n"), FileData[t].FileName);
-        t = FileData[t].Larger;
+    _tprintf(TEXT("\nHardlink group, %d of %d hardlinked instances found in search tree:\n"), groupLen + 1, item->NumLinks);
+    t = linksFirst != NULL ? linksFirst : item;
+    for (a = 0; a <= groupLen; a++) {
+        _tprintf(TEXT("  \"%s\"\n"), t->FileName);
+        t = t->Larger;
     }
 
     DupeStats.HardlinkGroups += 1;
 
-not_end:    
-    if (FileData[index].Smaller >= 0){
-        WalkTree(FileData[index].Smaller,-1,0);
+not_end:
+    if (item->Smaller != NULL) {
+        WalkTree(item->Smaller, NULL, 0);
     }
 }
 
@@ -854,8 +863,8 @@ static void ProcessFile(const TCHAR* FileName)
         ThisFile.FileIndex.Low      = FileInfo.nFileIndexLow;
         ThisFile.FileIndex.High     = FileInfo.nFileIndexHigh;
         ThisFile.NumLinks = FileInfo.nNumberOfLinks;
-        ThisFile.Larger = -1;
-        ThisFile.Smaller = -1;
+        ThisFile.Larger = NULL;
+        ThisFile.Smaller = NULL;
         ULARGE_INTEGER ul;
         ul.HighPart = FileInfo.nFileSizeHigh;
         ul.LowPart = FileInfo.nFileSizeLow;
@@ -878,7 +887,7 @@ static void ProcessFile(const TCHAR* FileName)
         }
     }
 
-    int Ptr = -1;
+    FileData_t * Ptr = NULL;
     int found;
     khiter_t k_fd = kh_get_fd(ThisFile.FileSize, 0, &found);
     if (found)
@@ -886,10 +895,10 @@ static void ProcessFile(const TCHAR* FileName)
 
     if (!HardlinkSearchMode) {
         if (found) {
-            if (FileData[Ptr].Checksum.Crc == 0) {
+            if (Ptr->Checksum.Crc == 0) {
                 HANDLE rootHandle = 0;
-                if (!OpenTheFile(FileData[Ptr].FileName, &rootHandle)) return;
-                FileData[Ptr].Checksum = ReadFileAndCalculateCRC32KB(rootHandle, FileData[Ptr].FileName, FileData[Ptr].FileSize);
+                if (!OpenTheFile(Ptr->FileName, &rootHandle)) return;
+                Ptr->Checksum = ReadFileAndCalculateCRC32KB(rootHandle, Ptr->FileName, Ptr->FileSize);
                 CloseHandle(rootHandle);
             }
 
@@ -1081,8 +1090,8 @@ int _tmain (int argc, TCHAR **argv)
     }
 
     NumUnique = 0;
-    NumAllocated = 1024;
-    FileData = (FileData_t*) malloc(sizeof(FileData_t)*1024);
+    NumAllocated = UNITS_PER_ALLOCATION;
+    FileData = (FileData_t*)malloc(sizeof(FileData_t) * NumAllocated);
     if (FileData == NULL){
         _ftprintf(stderr, TEXT("Malloc failure"));
         exit(EXIT_FAILURE);
@@ -1185,7 +1194,7 @@ int _tmain (int argc, TCHAR **argv)
         khint_t k;
         for (k = kh_begin(FileDataMap); k != kh_end(FileDataMap); ++k)
             if (kh_exist(FileDataMap, k))
-                WalkTree(kh_value(FileDataMap, k), -1, 0);
+                WalkTree(kh_value(FileDataMap, k), NULL, 0);
         _tprintf(TEXT("\nNumber of hardlink groups found: %d\n"), DupeStats.HardlinkGroups);
     }else{
         if (DupeStats.TotalFiles == 0){
