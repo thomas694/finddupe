@@ -34,6 +34,8 @@
 //     fixed a problem writing filenames with special unicode characters to the batch file
 //     fixed a memory problem with very large amounts of files
 //     added a 64-bit version for addressing more memory
+// Version 1.34  (c) Sep 2024  thomas694
+//     fixed a display problem with the progress indicator
 //
 // finddupe is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -49,7 +51,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //--------------------------------------------------------------------------
 
-#define VERSION "1.33"
+#define VERSION "1.34"
 
 #define REF_CODE
 
@@ -168,6 +170,7 @@ TCHAR* * IgnorePatterns;   // Patterns of filename to ignore (can be repeated, e
 int IgnorePatternsAlloc;   // Number of allocated ignore patterns
 int IgnorePatternsCount;   // Number of specified ignore patterns
 UINT m_old_code_page;
+BOOL NewConsoleMode;
 
 int MyGlob(const TCHAR * Pattern, int FollowReparse, void (*FileFuncParm)(const TCHAR * FileName));
 
@@ -196,8 +199,8 @@ static void CalcCrc(Checksum_t * Check, char * Data, unsigned NumBytes)
 //--------------------------------------------------------------------------
 void ClearProgressInd(void)
 {
-    if (ProgressIndicatorVisible){
-        _tprintf(TEXT("                                                                             \r"));
+    if (ProgressIndicatorVisible) {
+        _tprintf(NewConsoleMode ? TEXT("\33[2K\r") : TEXT("                                                                             \r"));
         ProgressIndicatorVisible = 0;
     }
 }
@@ -793,18 +796,17 @@ static void ProcessFile(const TCHAR* FileName)
                 TCHAR ShowName[55];
                 int l = _tcslen(FileName);
                 #ifdef UNICODE
-                wmemset(ShowName, L' ', sizeof(ShowName)/sizeof(ShowName[0]));
+                wmemset(ShowName, L'\0', sizeof(ShowName) / sizeof(ShowName[0]));
                 #else
                 memset(ShowName, ' ', sizeof(ShowName));
                 #endif
-                ShowName[54] = 0;
-                if (l > 50) l = 51;
+                if (l > 53) l = 53;
                 #ifdef UNICODE
                 wmemcpy(ShowName, FileName, l);
-                if (l >= 51) wmemcpy(ShowName+50,L"...",4);
+                if (l >= 53) wmemcpy(ShowName + 53, L"…", 1);
                 #else
                 memcpy(ShowName, FileName, l);
-                if (l >= 51) memcpy(ShowName+50,"...",4);
+                if (l >= 53) memcpy(ShowName + 53, "…", 1);
                 #endif
 
                 _tprintf(TEXT("Scanned %4d files: %s\r"), FilesMatched, ShowName);
@@ -977,7 +979,7 @@ static void CheckFileSystem(TCHAR drive)
     #endif
     if (_tcscmp(lpFileSystemNameBuffer, TEXT("NTFS")))
     {
-        if (ProgressIndicatorVisible) ClearProgressInd();
+        ClearProgressInd();
         _ftprintf(stderr, TEXT("finddupe can only make hardlinks on NTFS filesystems\n"));
         exit(EXIT_FAILURE);
     }
@@ -1004,6 +1006,11 @@ int _tmain (int argc, TCHAR **argv)
     _setmode(_fileno(stdout), _O_U16TEXT);
     _setmode(_fileno(stderr), _O_U16TEXT);
 #endif
+
+    HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
+    DWORD mode = 0;
+    GetConsoleMode(hConsole, &mode);
+    NewConsoleMode = SetConsoleMode(hConsole, mode | ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
 
     for (argn = 1; argn < argc; argn++) {
         arg = argv[argn];
@@ -1167,7 +1174,7 @@ int _tmain (int argc, TCHAR **argv)
 
         if (_tcslen(argv[argn]) >= 2 && argv[argn][0] == '\\' && argv[argn][1] == '\\' && (BatchFileName || MakeHardLinks))
         {
-            if (ProgressIndicatorVisible) ClearProgressInd();
+            ClearProgressInd();
             _ftprintf(stderr, TEXT("Cannot make hardlinks on network shares\n"));
             kh_destroy(hset, FilenameSet);
             kh_destroy(hmap, FileDataMap);
@@ -1228,6 +1235,8 @@ int _tmain (int argc, TCHAR **argv)
     if (DupeStats.CantReadFiles){
         _tprintf(TEXT("  %d files could not be opened\n"), DupeStats.CantReadFiles);
     }
+
+    SetConsoleMode(hConsole, mode);
 
     kh_destroy(hmap, FileDataMap);
 
