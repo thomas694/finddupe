@@ -21,6 +21,7 @@ I added the following features to finddupe:
 - checking for NTFS file system in batch and hardlink mode (v1.27)
 - performance optimizations (especially for very large amounts of files) (v1.28)
 - new option to skip linked duplicates in output list (v1.30)
+- 64-bit version for addressing more memory (for large amounts of files) (v1.33)
 
 It works for me, but some more testing is desirable.
 
