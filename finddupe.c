@@ -1116,14 +1116,36 @@ int _tmain (int argc, TCHAR **argv)
     #endif
 
     if (BatchFileName) {
+#ifdef UNICODE
+        BatchFile = _tfopen(BatchFileName, TEXT("wb"));
+#else
         BatchFile = _tfopen(BatchFileName, TEXT("w"));
+#endif
         if (BatchFile == NULL) {
             _ftprintf(stderr, TEXT("Unable to open task batch file '%s'\n"), BatchFileName);
             exit(EXIT_FAILURE);
         }
+#ifdef UNICODE
+        unsigned char bom[] = { 0xEF, 0xBB, 0xBF };
+        fwrite(bom, sizeof(bom), 1, BatchFile);
+        fclose(BatchFile);
+        BatchFile = _tfopen(BatchFileName, TEXT("a"));
+        if (BatchFile == NULL) {
+            _ftprintf(stderr, TEXT("Unable to open task batch file '%s'\n"), BatchFileName);
+            exit(EXIT_FAILURE);
+        }
+        _ftprintf(BatchFile, TEXT("\n"));
+#endif
         _ftprintf(BatchFile, TEXT("@echo off\n"));
         _ftprintf(BatchFile, TEXT("REM Batch file for replacing duplicates with hard links\n"));
         _ftprintf(BatchFile, TEXT("REM created by finddupe program\n"));
+#ifdef UNICODE
+        _ftprintf(BatchFile, TEXT("if errorlevel 1 (\n"));
+        _ftprintf(BatchFile, TEXT("  echo.\n"));
+        _ftprintf(BatchFile, TEXT("  echo Set code page to 65001. Rerun script to execute hardlink commands.\n"));
+        _ftprintf(BatchFile, TEXT("  chcp 65001\n"));
+        _ftprintf(BatchFile, TEXT(") else (\n"));
+#endif
         _ftprintf(BatchFile, TEXT("chcp 65001\n\n"));
     }
 
@@ -1212,6 +1234,9 @@ int _tmain (int argc, TCHAR **argv)
         }
 
         if (BatchFile){
+#ifdef UNICODE
+            _ftprintf(BatchFile, TEXT(")\n"));
+#endif
             fclose(BatchFile);
             BatchFile = NULL;
         }
