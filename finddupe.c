@@ -36,6 +36,8 @@
 //     added a 64-bit version for addressing more memory
 // Version 1.34  (c) Sep 2024  thomas694
 //     fixed a display problem with the progress indicator
+// Version 1.35  (c) Aug 2025  thomas694
+//     fixed a problem with some special characters (e.g. right single/double quotation mark)
 //
 // finddupe is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -51,7 +53,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //--------------------------------------------------------------------------
 
-#define VERSION "1.34"
+#define VERSION "1.35"
 
 #define REF_CODE
 
