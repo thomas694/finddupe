@@ -38,6 +38,11 @@
 //     fixed a display problem with the progress indicator
 // Version 1.35  (c) Aug 2025  thomas694
 //     fixed a problem with some special characters (e.g. right single/double quotation mark)
+// Version 1.36  (c) Dec 2025  thomas694
+//     fix a problem when trying to create hardlinks across drives
+//     fix a display problem with the progress indicator
+//     add fail-fast by checking all file patterns before scanning files
+//     fix batch file script to make Ctrl+C work again
 //
 // finddupe is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -53,7 +58,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //--------------------------------------------------------------------------
 
-#define VERSION "1.35"
+#define VERSION "1.36"
 
 #define REF_CODE
 
@@ -425,11 +430,12 @@ dont_read:
 
     if (BatchFile){
         // put command in batch file
-        if (DelDuplicates || !Hardlinked)
+        BOOL isSameVolume = IsSameVolume(ThisFile.FileName, DupeOf.FileName);
+        if (DelDuplicates || !Hardlinked && isSameVolume)
             ftprintf(BatchFile, TEXT("del %s\"%s\"\n"), (IsReadonly ? TEXT("/F ") : TEXT("")),
                 EscapeBatchName(ThisFile.FileName));
         if (!DelDuplicates){
-            if (!Hardlinked){
+            if (!Hardlinked && isSameVolume){
                 ftprintf(BatchFile, TEXT("fsutil hardlink create \"%s\" \"%s\"\n"),
                     ThisFile.FileName, DupeOf.FileName);
                 if (IsReadonly){
@@ -444,12 +450,15 @@ dont_read:
     }else if (MakeHardLinks || DelDuplicates){
         if (MakeHardLinks && Hardlinked) return 0; // Nothign to do.
 
-        if (_tunlink(ThisFile.FileName)){
-            ClearProgressInd();
-            _ftprintf(stderr, TEXT("Delete of '%s' failed\n"), DupeOf.FileName);
-            exit (EXIT_FAILURE);
-        }
-        if (MakeHardLinks){
+        BOOL isSameVolume = IsSameVolume(ThisFile.FileName, DupeOf.FileName);
+
+        if (DelDuplicates || MakeHardLinks && isSameVolume)
+            if (_tunlink(ThisFile.FileName)){
+                ClearProgressInd();
+                _ftprintf(stderr, TEXT("Delete of '%s' failed\n"), DupeOf.FileName);
+                exit (EXIT_FAILURE);
+            }
+        if (MakeHardLinks && isSameVolume){
             if (CreateHardLink(ThisFile.FileName, DupeOf.FileName, NULL) == 0){
                 // Uh-oh.  Better stop before we mess up more stuff!
                 ClearProgressInd();
@@ -471,12 +480,34 @@ dont_read:
             }
             ClearProgressInd();
             _tprintf(TEXT("    Created hardlink\n"));
-        }else{
+        }else if (DelDuplicates){
             ClearProgressInd();
             _tprintf(TEXT("    Deleted duplicate\n"));
         }
     }
     return 2;
+}
+
+static BOOL IsLocalPath(const TCHAR* path)
+{
+    if (!path || _tcslen(path) < 3)
+        return FALSE;
+
+    if (path[0] == _T('\\') && path[1] == _T('\\'))
+        return FALSE;
+
+    if (_istalpha(path[0]) && path[1] == _T(':') && path[2] == _T('\\'))
+        return TRUE;
+
+    return FALSE;
+}
+
+static BOOL IsSameVolume(TCHAR* path1, TCHAR* path2)
+{
+    if (!IsLocalPath(path1) || !IsLocalPath(path2))
+        return FALSE;
+
+    return _totupper(path1[0]) == _totupper(path2[0]);
 }
 
 static int ReadFileAndCalculateCRC(TCHAR* fileName, UINT64 fileSize, Checksum_t* checksum)
@@ -767,6 +798,8 @@ BOOL OpenTheFile(const TCHAR* FileName, HANDLE* FileHandle)
 //--------------------------------------------------------------------------
 static void ProcessFile(const TCHAR* FileName)
 {
+    static int winWidth = 0;
+
     UINT64 FileSize;
     Checksum_t CheckSum;
     DWORD ticksCompare = 0;
@@ -774,6 +807,15 @@ static void ProcessFile(const TCHAR* FileName)
     DWORD ticksFileInfo = 0;
     DWORD ticksByteRead = 0;
     DWORD ticksCRC = 0;
+
+    if (winWidth == 0) {
+        CONSOLE_SCREEN_BUFFER_INFO csbi;
+        HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
+        if (GetConsoleScreenBufferInfo(h, &csbi))
+            winWidth = csbi.srWindow.Right - csbi.srWindow.Left + 1 - 25;
+        else
+            winWidth = 55;
+    }
 
     if (MeasureDurations) ticksCompare = GetTickCount();
 
@@ -791,28 +833,32 @@ static void ProcessFile(const TCHAR* FileName)
     FileData_t ThisFile;
     memset(&ThisFile, 0, sizeof(ThisFile));
     {
-        static int LastPrint, Now;
+        static int LastPrint = 0, Now, lastLength = 0;
         Now = GetTickCount();
         if ((unsigned)(Now-LastPrint) > 200){
             if (ShowProgress){
-                TCHAR ShowName[55];
+                TCHAR* ShowName = (TCHAR*)malloc((winWidth) * sizeof(TCHAR));
                 int l = _tcslen(FileName);
                 #ifdef UNICODE
-                wmemset(ShowName, L'\0', sizeof(ShowName) / sizeof(ShowName[0]));
+                wmemset(ShowName, L'\0', winWidth);
                 #else
-                memset(ShowName, ' ', sizeof(ShowName));
+                memset(ShowName, '\0', winWidth);
                 #endif
-                if (l > 53) l = 53;
+                if (l > winWidth-2) l = winWidth-2;
                 #ifdef UNICODE
                 wmemcpy(ShowName, FileName, l);
-                if (l >= 53) wmemcpy(ShowName + 53, L"…", 1);
+                if (l >= winWidth-2) wmemcpy(ShowName + winWidth-2, L"…", 1);
+                if (lastLength > l) wmemset(ShowName + l, L' ', (size_t)(lastLength - l));
                 #else
                 memcpy(ShowName, FileName, l);
-                if (l >= 53) memcpy(ShowName + 53, "…", 1);
+                if (l >= winWidth-2) memcpy(ShowName + winWidth-2, "…", 1);
+                if (lastLength > l) memcpy(ShowName + l, ' ', (size_t)(lastLength - l));
                 #endif
 
                 _tprintf(TEXT("Scanned %4d files: %s\r"), FilesMatched, ShowName);
+                free(ShowName);
                 LastPrint = Now;
+                lastLength = l;
                 ProgressIndicatorVisible = 1;
             }
             fflush(stdout);
@@ -964,26 +1010,67 @@ static void Usage (void)
     exit(EXIT_FAILURE);
 }
 
-static void CheckFileSystem(TCHAR drive)
+static void CheckFileSystem(TCHAR* path)
 {
     if (!(BatchFileName || MakeHardLinks)) return;
 
-    TCHAR lpRootPathName[4];
-    _tcsncpy(lpRootPathName, TEXT("C:\\\0"), 4);
-    _tcsncpy(lpRootPathName, &drive, 1);
-    TCHAR lpFileSystemNameBuffer[MAX_PATH + 1];
+    TCHAR lpRootPathName[4] = { 0 };
+    _tcsncpy(lpRootPathName, path, 3);
+    TCHAR lpFileSystemNameBuffer[MAX_PATH + 1] = { 0 };
     #ifdef UNICODE
-    wmemset(lpFileSystemNameBuffer, L' ', sizeof(lpFileSystemNameBuffer) / sizeof(lpFileSystemNameBuffer[0]));
     BOOL ret = GetVolumeInformationW(lpRootPathName, NULL, 0, 0, 0, 0, lpFileSystemNameBuffer, MAX_PATH + 1);
     #else
-    memset(lpFileSystemNameBuffer, ' ', sizeof(lpFileSystemNameBuffer));
-    BOOL ret = GetVolumeInformationW(lpRootPathName, NULL, 0, 0, 0, 0, lpFileSystemNameBuffer, MAX_PATH + 1);
+    BOOL ret = GetVolumeInformationA(lpRootPathName, NULL, 0, 0, 0, 0, lpFileSystemNameBuffer, MAX_PATH + 1);
     #endif
     if (_tcscmp(lpFileSystemNameBuffer, TEXT("NTFS")))
     {
         ClearProgressInd();
         _ftprintf(stderr, TEXT("finddupe can only make hardlinks on NTFS filesystems\n"));
         exit(EXIT_FAILURE);
+    }
+}
+
+void CheckFilePattern(TCHAR* filePattern)
+{
+    static TCHAR DefaultDrive = '\0';
+    static TCHAR DriveUsed = '\0';
+    TCHAR Drive;
+    int a;
+
+    if (DefaultDrive == '\0') {
+        TCHAR CurrentDir[_MAX_PATH];
+        _tgetcwd(CurrentDir, _MAX_PATH);
+        DefaultDrive = tolower(CurrentDir[0]);
+    }
+
+    for (a=0;;a++){
+        if (filePattern[a] == '\0') break;
+        if (filePattern[a] == '/') filePattern[a] = '\\';
+    }
+
+    if (_tcslen(filePattern) >= 2 && filePattern[0] == '\\' && filePattern[1] == '\\' && (BatchFileName || MakeHardLinks))
+    {
+        ClearProgressInd();
+        _ftprintf(stderr, TEXT("Cannot make hardlinks on network shares\n"));
+        exit(EXIT_FAILURE);
+    }
+
+    if (filePattern[1] == ':'){
+        Drive = tolower(filePattern[0]);
+    }else{
+        Drive = DefaultDrive;
+    }
+    if (DriveUsed == '\0') DriveUsed = Drive;
+    if (DriveUsed != Drive){
+        if (BatchFileName || MakeHardLinks){
+            ClearProgressInd();
+            _ftprintf(stderr, TEXT("Error: Hardlinking across different drives not possible\n"));
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    if (_tcslen(filePattern) >= 3 && filePattern[1] == ':' && filePattern[2] == '\\') {
+        CheckFileSystem(filePattern);
     }
 }
 
@@ -994,9 +1081,8 @@ int _tmain (int argc, TCHAR **argv)
 {
     int argn;
     TCHAR * arg;
-    TCHAR DefaultDrive;
-    TCHAR DriveUsed = '\0';
     int indexFirstRef = 0;
+    int filePatternStart = 0;
     
     PrintDuplicates = 1;
     PrintFileSigs = 0;
@@ -1027,9 +1113,10 @@ int _tmain (int argc, TCHAR **argv)
 
     for (argn=1;argn<argc;argn++){
         arg = argv[argn];
-        if (arg[0] != '-') break; // Filenames from here on.
-
-        if (!_tcscmp(arg,TEXT("-h"))){
+        if (arg[0] != '-') {
+            CheckFilePattern(arg);
+            if (filePatternStart == 0) filePatternStart = argn;
+        }else if (!_tcscmp(arg,TEXT("-h"))){
             Usage();
             exit(EXIT_FAILURE);
         }else if (!_tcscmp(arg,TEXT("-bat"))){
@@ -1051,7 +1138,8 @@ int _tmain (int argc, TCHAR **argv)
         }else if (!_tcscmp(arg,TEXT("-listlink"))){
             HardlinkSearchMode = 1;
         }else if (!_tcscmp(arg,TEXT("-ref"))){
-            break;
+            if (filePatternStart == 0) filePatternStart = argn;
+            CheckFilePattern(argv[++argn]);
         }else if (!_tcscmp(arg,TEXT("-z"))){
             SkipZeroLength = 0;
         }else if (!_tcscmp(arg,TEXT("-u"))){
@@ -1080,6 +1168,8 @@ int _tmain (int argc, TCHAR **argv)
             exit(-1);
         }
     }
+
+    if (filePatternStart > 0) argn = filePatternStart;
 
     if (argn > argc){
         _ftprintf(stderr, TEXT("Missing argument!  Use -h for help\n"));
@@ -1146,26 +1236,18 @@ int _tmain (int argc, TCHAR **argv)
         _ftprintf(BatchFile, TEXT("  echo.\n"));
         _ftprintf(BatchFile, TEXT("  echo Set code page to 65001. Rerun script to execute hardlink commands.\n"));
         _ftprintf(BatchFile, TEXT("  chcp 65001\n"));
-        _ftprintf(BatchFile, TEXT(") else (\n"));
+        _ftprintf(BatchFile, TEXT("  exit /b\n"));
+        _ftprintf(BatchFile, TEXT(")\n"));
 #endif
         _ftprintf(BatchFile, TEXT("chcp 65001\n\n"));
     }
 
     memset(&DupeStats, 0, sizeof(DupeStats));
 
-    {
-        TCHAR CurrentDir[_MAX_PATH];
-        _tgetcwd(CurrentDir, _MAX_PATH);
-        DefaultDrive = tolower(CurrentDir[0]);
-        CheckFileSystem(DefaultDrive);
-    }
-
     FilenameSet = kh_init(hset);
     FileDataMap = kh_init(hmap);
 
     for (;argn<argc;argn++){
-        int a;
-        TCHAR Drive;
         FilesMatched = 0;
 
         if (!_tcscmp(argv[argn],TEXT("-ref"))){
@@ -1176,43 +1258,12 @@ int _tmain (int argc, TCHAR **argv)
             ReferenceFiles = 0;
         }
 
-        for (a=0;;a++){
-            if (argv[argn][a] == '\0') break;
-            if (argv[argn][a] == '/') argv[argn][a] = '\\';
-        }
-
-        if (argv[argn][1] == ':'){
-            Drive = tolower(argv[argn][0]);
-        }else{
-            Drive = DefaultDrive;
-        }
-        if (DriveUsed == '\0') DriveUsed = Drive;
-        if (DriveUsed != Drive){
-            if (MakeHardLinks){
-                _ftprintf(stderr, TEXT("Error: Hardlinking across different drives not possible\n"));
-                kh_destroy(hset, FilenameSet);
-                kh_destroy(hmap, FileDataMap);
-                return EXIT_FAILURE;
-            }
-        }
-
-        if (_tcslen(argv[argn]) >= 2 && argv[argn][0] == '\\' && argv[argn][1] == '\\' && (BatchFileName || MakeHardLinks))
-        {
-            ClearProgressInd();
-            _ftprintf(stderr, TEXT("Cannot make hardlinks on network shares\n"));
-            kh_destroy(hset, FilenameSet);
-            kh_destroy(hmap, FileDataMap);
-            return EXIT_FAILURE;
-        }
-        else if (_tcslen(argv[argn]) >= 3 && argv[argn][1] == ':' && argv[argn][2] == '\\') {
-            CheckFileSystem(argv[argn][0]);
-        }
-
         // Use my globbing module to do fancier wildcard expansion with recursive
         // subdirectories under Windows.
         MyGlob(argv[argn], FollowReparse, ProcessFile);
 
         if (!FilesMatched){
+            ClearProgressInd();
             _ftprintf(stderr, TEXT("Error: No files matched '%s'\n"), argv[argn]);
         }
     }
@@ -1236,9 +1287,6 @@ int _tmain (int argc, TCHAR **argv)
         }
 
         if (BatchFile){
-#ifdef UNICODE
-            _ftprintf(BatchFile, TEXT(")\n"));
-#endif
             fclose(BatchFile);
             BatchFile = NULL;
         }
