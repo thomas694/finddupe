@@ -43,6 +43,8 @@
 //     fix a display problem with the progress indicator
 //     add fail-fast by checking all file patterns before scanning files
 //     fix batch file script to make Ctrl+C work again
+// Version 1.37  (c) May 2026  thomas694
+//     add better hash algorithm (xxHash)
 //
 // finddupe is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -58,7 +60,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //--------------------------------------------------------------------------
 
-#define VERSION "1.36"
+#define VERSION "1.37"
 
 #define REF_CODE
 
@@ -86,6 +88,8 @@
 #include <fcntl.h>
 
 #include "khash.h"
+#define XXH_INLINE_ALL
+#include "xxhash.h"
 
 #define  S_IWUSR  0x80      // user has write permission
 #define  S_IWGRP  0x10      // group has write permission
@@ -97,22 +101,19 @@ DWORD totalCompare;
 DWORD totalPrint;
 DWORD totalFileInfo;
 DWORD totalByteRead;
-DWORD totalCRC;
+DWORD totalByteReadF;
+DWORD totalHash;
+DWORD totalHashF;
 DWORD totalCheck;
 DWORD ticksCheck;
 
-typedef struct {
-    unsigned int Crc;
-    unsigned int Sum;
-}Checksum_t;
-
-KHASH_MAP_INIT_INT64(hset, Checksum_t)
+KHASH_MAP_INIT_INT64(hset, XXH64_hash_t)
 KHASH_MAP_INIT_INT64(hmap, UINT64)
 
 // Data structure for file allocations:
 typedef struct FileData_t FileData_t;
 struct FileData_t {
-    Checksum_t Checksum;
+    XXH64_hash_t Hash;
     struct {
         int High;
         int Low;
@@ -150,7 +151,7 @@ struct {
 }DupeStats;
 
 // How many bytes to calculate file signature of.
-#define BYTES_DO_CHECKSUM_OF 32768
+#define BYTES_DO_HASH_OF 32768
 
 
 // Parameters for what to do
@@ -183,23 +184,12 @@ int MyGlob(const TCHAR * Pattern, int FollowReparse, void (*FileFuncParm)(const 
 
 
 //--------------------------------------------------------------------------
-// Calculate some 64-bit file signature.  CRC and a checksum
+// Calculate some 64-bit hash
 //--------------------------------------------------------------------------
-static void CalcCrc(Checksum_t * Check, char * Data, unsigned NumBytes)
+static void CalcHash(XXH64_hash_t* Hash, char * Data, unsigned NumBytes)
 {
-    unsigned a;
-    unsigned Reg, Sum;
-    Reg = Check->Crc;
-    Sum = Check->Sum;
-    for(a=0;a<NumBytes;a++){
-        Reg = Reg ^ Data[a];
-        Sum = Sum + Data[a];
-        Reg = (Reg >> 8) ^ ((Reg & 0xff) << 24) ^ ((Reg & 0xff) << 9);
-        Sum = (Sum << 1) + (Sum >> 31);
+    *Hash = XXH3_64bits(Data, NumBytes);
     }
-    Check->Crc = Reg;
-    Check->Sum = Sum;
-}
 
 //--------------------------------------------------------------------------
 // Clear line (erase the progress indicator)
@@ -229,7 +219,7 @@ TCHAR * EscapeBatchName(TCHAR * Name)
     return EscName;
 }
 
-static INT64 CalcFilenameCRC(TCHAR* filename)
+static UINT64 CalcFilenameHash(TCHAR* filename)
 {
     unsigned int len = _tcslen(filename);
 #ifdef UNICODE
@@ -237,30 +227,29 @@ static INT64 CalcFilenameCRC(TCHAR* filename)
 #endif
     char* charFileName = (char*)filename;
 
-    Checksum_t checkSum = { .Crc = 0, .Sum = 0 };
-    CalcCrc(&checkSum, charFileName, len);
+    XXH64_hash_t hash = 0;
+    CalcHash(&hash, charFileName, len);
 
-    INT64 crc = (INT64)(((UINT64)checkSum.Crc) << 32 | ((UINT64)checkSum.Sum));
-    return crc;
+    return hash;
 }
 
-static khiter_t kh_get_fn(INT64 filenameCRC, int createNew, int* created)
+static khiter_t kh_get_fn(INT64 filenameHash, int createNew, int* created)
 {
-    khint_t k = kh_get(hset, FilenameSet, filenameCRC);
+    khint_t k = kh_get(hset, FilenameSet, filenameHash);
     if (createNew && k == kh_end(FilenameSet))
     {
         *created = 1;
-        k = kh_put_fn(filenameCRC);
+        k = kh_put_fn(filenameHash);
     }
     else
         *created = 0;
     return k;
 }
 
-static khiter_t kh_put_fn(INT64 filenameCRC)
+static khiter_t kh_put_fn(INT64 filenameHash)
 {
     int ret;
-    khint_t k = kh_put(hset, FilenameSet, filenameCRC, &ret);
+    khint_t k = kh_put(hset, FilenameSet, filenameHash, &ret);
     if (ret == -1) {
         _ftprintf(stderr, TEXT("error storing new filename entry"));
         kh_destroy(hset, FilenameSet);
@@ -268,7 +257,7 @@ static khiter_t kh_put_fn(INT64 filenameCRC)
     }
     if (ret == 0) return k;
 
-    Checksum_t chk = { 0 };
+    XXH64_hash_t chk = 0;
     kh_value(FilenameSet, k) = chk;
     return k;
 }
@@ -303,7 +292,7 @@ static khiter_t kh_put_fd(UINT64 fileSize)
 
 void WriteStringToFile(FILE* file, TCHAR* text) {
     if (sizeof(TCHAR) == sizeof(char)) {
-        _ftprintf(file, "%s", text);
+        _ftprintf(file, _T("%s"), text);
     }
     else {
         size_t required_size = WideCharToMultiByte(CP_UTF8, 0, text, -1, NULL, 0, NULL, NULL);
@@ -340,8 +329,8 @@ static int EliminateDuplicate(FileData_t ThisFile, FileData_t DupeOf)
     int IsReadonly;
     struct _stat64 FileStat;
     int doCalc1 = 0, doCalc2 = 0;
-    Checksum_t chk1 = { .Crc = 0,.Sum = 0 };
-    Checksum_t chk2 = { .Crc = 0,.Sum = 0 };
+    XXH64_hash_t chk1 = 0;
+    XXH64_hash_t chk2 = 0;
 
     if (ThisFile.FileSize != DupeOf.FileSize) return 0;
 
@@ -356,25 +345,25 @@ static int EliminateDuplicate(FileData_t ThisFile, FileData_t DupeOf)
         return 0;
     }
 
-    INT64 fnCRC1, fnCRC2;
-    fnCRC1 = CalcFilenameCRC(ThisFile.FileName);
-    fnCRC2 = CalcFilenameCRC(DupeOf.FileName);
+    INT64 fnHash1, fnHash2;
+    fnHash1 = CalcFilenameHash(ThisFile.FileName);
+    fnHash2 = CalcFilenameHash(DupeOf.FileName);
 
-    khint_t k1 = kh_get_fn(fnCRC1, 1, &doCalc1);
+    khint_t k1 = kh_get_fn(fnHash1, 1, &doCalc1);
     if (!doCalc1) {
         chk1 = kh_value(FilenameSet, k1);
-        if (chk1.Crc == 0) doCalc1 = 1;
+        if (chk1 == 0) doCalc1 = 1;
     }
-    khint_t k2 = kh_get_fn(fnCRC2, 1, &doCalc2);
+    khint_t k2 = kh_get_fn(fnHash2, 1, &doCalc2);
     if (!doCalc2) {
         chk2 = kh_value(FilenameSet, k2);
-        if (chk2.Crc == 0) doCalc2 = 1;
+        if (chk2 == 0) doCalc2 = 1;
     }
 
     if (doCalc1 || doCalc2)
     {
-        if (doCalc1 && !ReadFileAndCalculateCRC(ThisFile.FileName, ThisFile.FileSize, &chk1)) return 0;
-        if (doCalc2 && !ReadFileAndCalculateCRC(DupeOf.FileName, DupeOf.FileSize, &chk2)) return 0;
+        if (doCalc1 && !ReadFileAndCalculateHash(ThisFile.FileName, ThisFile.FileSize, &chk1)) return 0;
+        if (doCalc2 && !ReadFileAndCalculateHash(DupeOf.FileName, DupeOf.FileSize, &chk2)) return 0;
 
         if (doCalc1) kh_value(FilenameSet, k1) = chk1;
         if (doCalc2) kh_value(FilenameSet, k2) = chk2;
@@ -382,10 +371,10 @@ static int EliminateDuplicate(FileData_t ThisFile, FileData_t DupeOf)
     //if (!doCalc1) chk1 = kh_value(FilenameSet, k1);
     //if (!doCalc2) chk2 = kh_value(FilenameSet, k2);
 
-    if (memcmp(&chk1, &chk2, sizeof(Checksum_t)) == 0) IsDuplicate = 1;
+    if (memcmp(&chk1, &chk2, sizeof(XXH64_hash_t)) == 0) IsDuplicate = 1;
 
     if (!IsDuplicate){
-        // Full file duplicate check failed (CRC collision, or differs only after 32k)
+        // Full file duplicate check failed (hash collision, or differs only after 32k)
         return 0;
     }
 
@@ -510,41 +499,62 @@ static BOOL IsSameVolume(TCHAR* path1, TCHAR* path2)
     return _totupper(path1[0]) == _totupper(path2[0]);
 }
 
-static int ReadFileAndCalculateCRC(TCHAR* fileName, UINT64 fileSize, Checksum_t* checksum)
+static int ReadFileAndCalculateHash(TCHAR* fileName, UINT64 fileSize, XXH64_hash_t* hash)
 {
     #define CHUNK_SIZE 0x10000
     FILE * File;
-    UINT64 BytesLeft;
-    size_t BytesToRead;
-    char Buf[CHUNK_SIZE];
-    int IsError = 0;
 
-    File = _tfopen(fileName, TEXT("rb"));
+    HANDLE h = CreateFile(
+        fileName,
+        GENERIC_READ,
+        FILE_SHARE_READ,
+        NULL,
+        OPEN_EXISTING,
+        FILE_FLAG_SEQUENTIAL_SCAN,
+        NULL
+    );
+
+    if (h == INVALID_HANDLE_VALUE) {
+        return 0;
+    }
+
+    int fd = _open_osfhandle((intptr_t)h, 0);
+
+    File = _tfdopen(fd, TEXT("rb"));
     if (File == NULL) {
         return 0;
     }
-    memset(checksum, 0, sizeof(Checksum_t));
-
-    BytesLeft = fileSize;
-
-    while (BytesLeft) {
-        BytesToRead = (BytesLeft > CHUNK_SIZE) ? CHUNK_SIZE : BytesLeft;
-
-        if (fread(Buf, 1, BytesToRead, File) != BytesToRead) {
-            ClearProgressInd();
-            _ftprintf(stderr, TEXT("Error doing full file read on '%s'\n"), fileName);
-            IsError = 1;
-            break;
-        }
-
-        CalcCrc(checksum, Buf, BytesToRead);
-
-        BytesLeft -= BytesToRead;
+    if (setvbuf(File, NULL, _IOFBF, CHUNK_SIZE) != 0) {
+        perror("setvbuf"); fclose(File); return 0;
     }
+
+    memset(hash, 0, sizeof(XXH64_hash_t));
+
+    XXH3_state_t* state = XXH3_createState();
+    if (state == NULL) {
+        _ftprintf(stderr, TEXT("Out of memory!"));
+        return 0;
+    }
+    XXH3_64bits_reset(state);
+    char buffer[CHUNK_SIZE];
+    size_t count;
+
+    int ticksByteRead, ticksHash;
+    if (MeasureDurations) ticksByteRead = GetTickCount();
+
+    while ((count = fread(buffer, 1, sizeof(buffer), File)) != 0) {
+        if (MeasureDurations) { ticksByteRead = GetTickCount() - ticksByteRead; totalByteReadF += ticksByteRead; ticksHash = GetTickCount(); }
+
+        XXH3_64bits_update(state, buffer, count);
+
+        if (MeasureDurations) { ticksHash = GetTickCount() - ticksHash; totalHashF += ticksHash; ticksByteRead = GetTickCount(); }
+    }
+    *hash = XXH3_64bits_digest(state);
+    XXH3_freeState(state);
 
     fclose(File);
     
-    return !IsError;
+    return 1;
 }
 
 #ifdef REF_CODE
@@ -582,7 +592,7 @@ static int IsNonRefPath(TCHAR * filename)
 }
 #endif
 
-static void StoreFileData(FileData_t ThisFile, INT64 filenameCRC)
+static void StoreFileData(FileData_t ThisFile, INT64 filenameHash)
 {
     int currentIndex = NumUnique % UNITS_PER_ALLOCATION;
 
@@ -603,16 +613,16 @@ static void StoreFileData(FileData_t ThisFile, INT64 filenameCRC)
     if (!found)
         kh_value(FileDataMap, k) = &FileData[currentIndex];
 
-    if (filenameCRC == 0)
-        filenameCRC = CalcFilenameCRC(ThisFile.FileName);
+    if (filenameHash == 0)
+        filenameHash = CalcFilenameHash(ThisFile.FileName);
 
-    kh_put_fn(filenameCRC);
+    kh_put_fn(filenameHash);
 }
 
 //--------------------------------------------------------------------------
 // Check for duplicates.
 //--------------------------------------------------------------------------
-static void CheckDuplicate(FileData_t *Ptr, FileData_t ThisFile, INT64 filenameCRC)
+static void CheckDuplicate(FileData_t *Ptr, FileData_t ThisFile, INT64 filenameHash)
 {
     FileData_t *prevPtr = NULL;
     FileData_t * *Link;
@@ -635,7 +645,7 @@ static void CheckDuplicate(FileData_t *Ptr, FileData_t ThisFile, INT64 filenameC
     int comp = 0, oldComp;
     for (;;) {
         oldComp = comp;
-        comp = memcmp(&ThisFile.Checksum, &Ptr->Checksum, sizeof(Checksum_t));
+        comp = memcmp(&ThisFile.Hash, &Ptr->Hash, sizeof(XXH64_hash_t));
         if (comp == 0) {
             // the same file
             if (_tcscmp(ThisFile.FileName, Ptr->FileName) == 0) {
@@ -656,12 +666,12 @@ static void CheckDuplicate(FileData_t *Ptr, FileData_t ThisFile, INT64 filenameC
                 }
             }
             // Build a chain on one side of the branch.
-            // That way, we will check every checksum collision from here on.
-            // Mark that we are on chain with equal checksums
+            // That way, we will check every hash collision from here on.
+            // Mark that we are on chain with equal hashes
             comp = 2;
         }
         else if (oldComp == 2) {
-            // Insert it at the chain end before the next higher checksum so that the branch keeps sorted
+            // Insert it at the chain end before the next higher hash so that the branch keeps sorted
             comp = 3;
         }
 
@@ -697,7 +707,7 @@ static void CheckDuplicate(FileData_t *Ptr, FileData_t ThisFile, INT64 filenameC
     DupeStats.TotalFiles += 1;
     DupeStats.TotalBytes += (__int64)ThisFile.FileSize;
 
-    StoreFileData(ThisFile, filenameCRC);
+    StoreFileData(ThisFile, filenameHash);
 }
 
 //--------------------------------------------------------------------------
@@ -712,7 +722,7 @@ static void WalkTree(FileData_t *item, FileData_t *linksFirst, int groupLen)
 
     if (item->Larger != NULL) {
         FileData_t *larger = item->Larger;
-        if (memcmp(&larger->Checksum, &item->Checksum, sizeof(Checksum_t)) == 0) {
+        if (memcmp(&larger->Hash, &item->Hash, sizeof(XXH64_hash_t)) == 0) {
             // it continues the same group.
             WalkTree(item->Larger, linksFirst != NULL ? linksFirst : item, groupLen + 1);
             goto not_end;
@@ -736,17 +746,17 @@ not_end:
     }
 }
 
-Checksum_t ReadFileAndCalculateCRC32KB(HANDLE FileHandle, const TCHAR* FileName, UINT64 FileSize)
+XXH64_hash_t ReadFileAndCalculateHash32KB(HANDLE FileHandle, const TCHAR* FileName, UINT64 FileSize)
 {
-    Checksum_t CheckSum;
-    char FileBuffer[BYTES_DO_CHECKSUM_OF];
+    XXH64_hash_t hash;
+    char FileBuffer[BYTES_DO_HASH_OF];
     unsigned BytesRead, BytesToRead;
-    memset(&CheckSum, 0, sizeof(CheckSum));
+    memset(&hash, 0, sizeof(hash));
 
-    int ticksByteRead, ticksCRC;
+    int ticksByteRead, ticksHash;
     if (MeasureDurations) ticksByteRead = GetTickCount();
 
-    BytesToRead = (FileSize > BYTES_DO_CHECKSUM_OF) ? BYTES_DO_CHECKSUM_OF : FileSize;
+    BytesToRead = (FileSize > BYTES_DO_HASH_OF) ? BYTES_DO_HASH_OF : FileSize;
     BOOL ret = ReadFile(FileHandle, FileBuffer, BytesToRead, &BytesRead, NULL);
     if (!ret) {
         if (!HideCantReadMessage) {
@@ -754,22 +764,21 @@ Checksum_t ReadFileAndCalculateCRC32KB(HANDLE FileHandle, const TCHAR* FileName,
             _ftprintf(stderr, TEXT("file read problem on '%s'\n"), FileName);
         }
         CloseHandle(FileHandle);
-        return;
+        return 0;
     }
 
-    if (MeasureDurations) { ticksByteRead = GetTickCount() - ticksByteRead; totalByteRead += ticksByteRead; ticksCRC = GetTickCount(); }
+    if (MeasureDurations) { ticksByteRead = GetTickCount() - ticksByteRead; totalByteRead += ticksByteRead; ticksHash = GetTickCount(); }
 
-    CalcCrc(&CheckSum, FileBuffer, BytesRead);
+    CalcHash(&hash, FileBuffer, BytesRead);
 
-    if (MeasureDurations) { ticksCRC = GetTickCount() - ticksCRC; totalCRC += ticksCRC; }
+    if (MeasureDurations) { ticksHash = GetTickCount() - ticksHash; totalHash += ticksHash; }
 
-    CheckSum.Sum += FileSize;
     if (PrintFileSigs) {
         ClearProgressInd();
-        _tprintf(TEXT("%08x%08x %10llu %s\n"), CheckSum.Crc, CheckSum.Sum, FileSize, FileName);
+        _tprintf(TEXT("%016llx %10llu %s\n"), hash, FileSize, FileName);
     }
 
-    return CheckSum;
+    return hash;
 }
 
 BOOL OpenTheFile(const TCHAR* FileName, HANDLE* FileHandle)
@@ -801,12 +810,11 @@ static void ProcessFile(const TCHAR* FileName)
     static int winWidth = 0;
 
     UINT64 FileSize;
-    Checksum_t CheckSum;
     DWORD ticksCompare = 0;
     DWORD ticksPrint = 0;
     DWORD ticksFileInfo = 0;
     DWORD ticksByteRead = 0;
-    DWORD ticksCRC = 0;
+    DWORD ticksHash = 0;
 
     if (winWidth == 0) {
         CONSOLE_SCREEN_BUFFER_INFO csbi;
@@ -820,9 +828,9 @@ static void ProcessFile(const TCHAR* FileName)
     if (MeasureDurations) ticksCompare = GetTickCount();
 
     // replace linear list search with hashset lookup
-    INT64 crc = CalcFilenameCRC(FileName);
+    INT64 hash = CalcFilenameHash(FileName);
     int created;
-    khiter_t k = kh_get_fn(crc, 0, &created);
+    khiter_t k = kh_get_fn(hash, 0, &created);
     if (k != kh_end(FilenameSet))
     {
         return;
@@ -848,7 +856,7 @@ static void ProcessFile(const TCHAR* FileName)
                 #ifdef UNICODE
                 wmemcpy(ShowName, FileName, l);
                 if (l >= winWidth-2) wmemcpy(ShowName + winWidth-2, L"…", 1);
-                if (lastLength > l) wmemset(ShowName + l, L' ', (size_t)(lastLength - l));
+                if (lastLength > l) wmemset(ShowName + l, L' ', ((size_t)lastLength - l));
                 #else
                 memcpy(ShowName, FileName, l);
                 if (l >= winWidth-2) memcpy(ShowName + winWidth-2, "…", 1);
@@ -879,7 +887,7 @@ static void ProcessFile(const TCHAR* FileName)
         {
             DupeStats.IgnoredFiles++;
             ThisFile.FileName = _tcsdup(FileName);
-            StoreFileData(ThisFile, crc);
+            StoreFileData(ThisFile, hash);
             return;
         }
     }
@@ -910,7 +918,7 @@ static void ProcessFile(const TCHAR* FileName)
 
         //_tprintf(TEXT("    Info:  Index: %08x %08x\n"),FileInfo.nFileIndexHigh, FileInfo.nFileIndexLow);
 
-        // Use the file index (which is NTFS equivalent of the iNode) instead of the CRC.
+        // Use the file index (which is NTFS equivalent of the iNode) instead of the hash.
         ThisFile.FileIndex.Low      = FileInfo.nFileIndexLow;
         ThisFile.FileIndex.High     = FileInfo.nFileIndexHigh;
         ThisFile.NumLinks = FileInfo.nNumberOfLinks;
@@ -931,10 +939,9 @@ static void ProcessFile(const TCHAR* FileName)
         }
 
         if (HardlinkSearchMode){
-            // For hardlink search mode, duplicates are detected by file index, not CRC,
-            // so copy the file ID into the CRC.
-            ThisFile.Checksum.Sum = ThisFile.FileIndex.Low;
-            ThisFile.Checksum.Crc = ThisFile.FileIndex.High;
+            // For hardlink search mode, duplicates are detected by file index, not Hash,
+            // so copy the file ID into the Hash.
+            ThisFile.Hash = ((long long)ThisFile.FileIndex.High << 32) | (unsigned int)ThisFile.FileIndex.Low;
         }
     }
 
@@ -946,14 +953,14 @@ static void ProcessFile(const TCHAR* FileName)
 
     if (!HardlinkSearchMode) {
         if (found) {
-            if (Ptr->Checksum.Crc == 0) {
+            if (Ptr->Hash == 0) {
                 HANDLE rootHandle = 0;
                 if (!OpenTheFile(Ptr->FileName, &rootHandle)) return;
-                Ptr->Checksum = ReadFileAndCalculateCRC32KB(rootHandle, Ptr->FileName, Ptr->FileSize);
+                Ptr->Hash = ReadFileAndCalculateHash32KB(rootHandle, Ptr->FileName, Ptr->FileSize);
                 CloseHandle(rootHandle);
             }
 
-            ThisFile.Checksum = ReadFileAndCalculateCRC32KB(FileHandle, FileName, FileSize);
+            ThisFile.Hash = ReadFileAndCalculateHash32KB(FileHandle, FileName, FileSize);
         }
     }
     CloseHandle(FileHandle);
@@ -961,12 +968,13 @@ static void ProcessFile(const TCHAR* FileName)
     ThisFile.FileName = _tcsdup(FileName); // allocate the string last, so 
                                           // we don't waste memory on errors.
 
-    CheckDuplicate(Ptr, ThisFile, crc);
+    CheckDuplicate(Ptr, ThisFile, hash);
 
     if (MeasureDurations) {
-        _tprintf(TEXT("Cmp: %d / %d Print: %d / %d FS: 0 / 0 FI: %d / %d BR: %d / %d CRC: %d / %d CHK: %d / %d  =  %d\n"),
-            ticksCompare, totalCompare, ticksPrint, totalPrint, ticksFileInfo, totalFileInfo, ticksByteRead, totalByteRead, ticksCRC, totalCRC, ticksCheck, totalCheck,
-            (totalCompare + totalPrint + totalFileInfo + totalByteRead + totalCRC + totalCheck));
+        _tprintf(TEXT("Cmp: %d / %d Print: %d / %d FS: 0 / 0 FI: %d / %d BR: %d / %d Hash: %d / %d BR_F: - / %d Hash_F: - / %d CHK: %d / %d  =  %d\n"),
+            ticksCompare, totalCompare, ticksPrint, totalPrint, ticksFileInfo, totalFileInfo, ticksByteRead, totalByteRead, ticksHash, totalHash, 
+            totalByteReadF, totalHashF, ticksCheck, totalCheck,
+            (totalCompare + totalPrint + totalFileInfo + totalByteRead + totalHash + totalCheck));
     }
 }
 

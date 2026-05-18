@@ -32,6 +32,9 @@
     <ClInclude Include="khash.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="xxhash.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="version.rc">

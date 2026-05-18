@@ -155,6 +155,7 @@
     <ClInclude Include="khash.h" />
     <ClInclude Include="resource.h" />
     <ClInclude Include="version.h" />
+    <ClInclude Include="xxhash.h" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="version.rc" />
