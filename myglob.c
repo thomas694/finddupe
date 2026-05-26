@@ -15,6 +15,8 @@
 // Version 1.25
 // Copyright (C) Jun 2017  thomas694
 //     added unicode support
+// Version 1.37  (c) May 2026  thomas694
+//     add options to match by name or name plus relative path
 //
 // This file is part of finddupe.
 //
@@ -46,14 +48,16 @@
 #define FALSE 0
 
 //#define DEBUGGING
-#define REF_CODE
 
-#ifdef REF_CODE
-extern TCHAR* * PathData;
+typedef struct PathData_t PathData_t;
+struct PathData_t {
+    TCHAR* Path;
+    unsigned char IsRef;
+};
+extern PathData_t* PathData;
 extern int PathAllocated;
 extern int PathUnique;
 extern int ReferenceFiles;
-#endif
 
 typedef struct {
     TCHAR * Name;
@@ -147,9 +151,7 @@ static void Recurse(const TCHAR * Pattern, int FollowReparse, void (*FileFuncPar
     TCHAR BasePattern[_MAX_PATH];
     TCHAR MatchPattern[_MAX_PATH];
     TCHAR PatCopy[_MAX_PATH*2];
-    #ifdef REF_CODE
     TCHAR * refpath;
-    #endif
 
     int a;
     int MatchDirs;
@@ -217,22 +219,24 @@ DoExtraLevel:
         _tprintf(TEXT("Base:%s  Pattern:%s dirs:%d\n"), BasePattern, MatchPattern, MatchDirs);
     #endif
 
-    #ifdef REF_CODE
-        if (MatchDirs == 0 && ReferenceFiles) {
-            if (PathUnique >= PathAllocated) {
-                // Array is full.  Make it bigger
-                PathAllocated = PathAllocated + PathAllocated/2;
-                PathData = realloc(PathData, sizeof(TCHAR*) * PathAllocated);
-                if (PathData == NULL){
-                    _ftprintf(stderr, TEXT("Malloc failure"));
-                    exit(EXIT_FAILURE);
-                }
-            };
-            refpath = _tcsdup(BasePattern);
-            PathData[PathUnique] = refpath;
-            PathUnique += 1;
-        }
-    #endif
+    if (MatchDirs == 0) {
+        if (PathUnique >= PathAllocated) {
+            // Array is full.  Make it bigger
+            int old = PathAllocated;
+            PathAllocated = PathAllocated + (PathAllocated >> 1);
+            PathAllocated = (PathAllocated + 1) & ~(size_t)1;
+            PathData = realloc(PathData, sizeof(PathData_t) * PathAllocated);
+            if (PathData == NULL){
+                _ftprintf(stderr, TEXT("Malloc failure"));
+                exit(EXIT_FAILURE);
+            }
+            memset(PathData + old, 0, (PathAllocated - old) * sizeof(PathData_t));
+        };
+        refpath = _tcsdup(BasePattern);
+        PathData[PathUnique].Path = refpath;
+        PathData[PathUnique].IsRef = ReferenceFiles;
+        PathUnique += 1;
+    }
 
     {
         FileEntry * FileList = NULL;
@@ -385,15 +389,13 @@ int _tmain (int argc, TCHAR **argv)
     int argn;
     TCHAR * arg;
 
-    #ifdef REF_CODE
     PathUnique = 0;
-    PathAllocated = 64;
+    PathAllocated = 2;
     PathData = malloc(sizeof(TCHAR*)*PathAllocated);
     if (PathData == NULL){
         _ftprintf(stderr, TEXT("Malloc failure"));
         exit(EXIT_FAILURE);
     }
-    #endif
 
     for (argn=1;argn<argc;argn++){
         MyGlob(argv[argn], 1, ShowName);

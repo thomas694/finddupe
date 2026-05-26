@@ -45,6 +45,8 @@
 //     fix batch file script to make Ctrl+C work again
 // Version 1.37  (c) May 2026  thomas694
 //     add better hash algorithm (xxHash)
+//     add options to match by name or name plus relative path
+//     fix bug in reference path determination
 //
 // finddupe is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -61,8 +63,6 @@
 //--------------------------------------------------------------------------
 
 #define VERSION "1.37"
-
-#define REF_CODE
 
 #include <locale.h>
 #include <stdio.h>
@@ -132,11 +132,14 @@ static khash_t(hmap) * FileDataMap;
 
 #define UNITS_PER_ALLOCATION 102400
 
-#ifdef REF_CODE
-TCHAR* * PathData;
+typedef struct PathData_t PathData_t;
+struct PathData_t {
+    TCHAR* Path;
+    unsigned char IsRef;
+};
+PathData_t* PathData;
 int PathAllocated;
 int PathUnique;
-#endif
 
 // Duplicate statistics summary
 struct {
@@ -173,6 +176,7 @@ int ProgressIndicatorVisible = 0; // Weither a progress indicator needs to be ov
 int FollowReparse = 0;     // Whether to follow reparse points (like unix softlinks for NTFS)
 int MeasureDurations = 0;  // Measure how many ticks the different tasks take
 int SkipLinkedDuplicates = 0; // Skip linked duplicates and show only unlinked ones
+int SameNameOrRelative = 0; // Match only files with same name (1) or additionally relative path (2)
 
 TCHAR* * IgnorePatterns;   // Patterns of filename to ignore (can be repeated, eg. .bak, .tmp)
 int IgnorePatternsAlloc;   // Number of allocated ignore patterns
@@ -557,40 +561,15 @@ static int ReadFileAndCalculateHash(TCHAR* fileName, UINT64 fileSize, XXH64_hash
     return 1;
 }
 
-#ifdef REF_CODE
-static int IsNonRefPath(TCHAR * filename)
+static int IsNonRefPath(TCHAR* filename)
 {
-    int i;
-    TCHAR * cmpPath;
-        
-    i = _tcslen(filename)-1;
-    for (i; i >= 0; i--)
+    for (int i = 0; i < PathUnique; i++)
     {
-        if ((int)filename[i] == (int)'\\') break;
+        if (PathData[i].IsRef && StringStartsWith(filename, PathData[i].Path)) return 0;
     }
-
-    if (i == 0)
-    {
-        _ftprintf(stderr, TEXT("IsNonRefPath, path without any slash!?"));
-        exit(EXIT_FAILURE);
-    }
-
-    cmpPath = (TCHAR*) malloc(sizeof(TCHAR) * (i+2));
-    _tcsncpy(cmpPath, filename, i+1);
-    cmpPath[i+1] = '\0';
-
-    for (i = 0; i < PathUnique; i++)
-    {
-        if (_tcscmp(cmpPath, PathData[i]) == 0) {
-            free(cmpPath);
-            return 0;
-        }
-    }
-    free(cmpPath);
 
     return 1;
 }
-#endif
 
 static void StoreFileData(FileData_t ThisFile, INT64 filenameHash)
 {
@@ -653,11 +632,7 @@ static void CheckDuplicate(FileData_t *Ptr, FileData_t ThisFile, INT64 filenameH
                 return;
             }
             // Check for true duplicate.
-            #ifdef REF_CODE
-            if (!ReferenceFiles && !HardlinkSearchMode && IsNonRefPath(ThisFile.FileName)) {
-            #else
-            if (!ReferenceFiles && !HardlinkSearchMode) {
-            #endif
+            if (!ReferenceFiles && !HardlinkSearchMode && IsNonRefPath(ThisFile.FileName) && !SkipNameOrPathOption(ThisFile.FileName, Ptr->FileName)) {
                 int r = EliminateDuplicate(ThisFile, *Ptr);
                 if (r) {
                     if (r == 2) Ptr->NumLinks += 1; // Update link count.
@@ -708,6 +683,57 @@ static void CheckDuplicate(FileData_t *Ptr, FileData_t ThisFile, INT64 filenameH
     DupeStats.TotalBytes += (__int64)ThisFile.FileSize;
 
     StoreFileData(ThisFile, filenameHash);
+}
+
+void RemoveSubstring(TCHAR* str, const TCHAR* sub)
+{
+    TCHAR* pos = _tcsstr(str, sub);
+    if (pos) {
+        size_t len = _tcslen(sub);
+        memmove(pos, pos + len, (_tcslen(pos + len) + 1) * sizeof(TCHAR));
+    }
+}
+
+BOOL StringStartsWith(const TCHAR* str, const TCHAR* prefix)
+{
+    size_t len = _tcslen(prefix);
+    return _tcsncmp(str, prefix, len) == 0;
+}
+
+BOOL SkipNameOrPathOption(TCHAR* filename1, TCHAR* filename2)
+{
+    if (SameNameOrRelative == 0) return 0;
+
+    TCHAR bn1[_MAX_FNAME];
+    TCHAR ext1[_MAX_EXT];
+    TCHAR bn2[_MAX_FNAME];
+    TCHAR ext2[_MAX_EXT];
+    _tsplitpath(filename1, NULL, NULL, bn1, ext1);
+    _tsplitpath(filename2, NULL, NULL, bn2, ext2);
+
+    if (_tcsicmp(bn1, bn2) != 0 || _tcsicmp(ext1, ext2) != 0) return 1;
+    if (SameNameOrRelative == 1) return 0;
+
+    // remove base paths
+    int done = 0;
+    TCHAR* fn1 = _tcsdup(filename1);
+    TCHAR* fn2 = _tcsdup(filename2);
+    for (int i = 0; i < PathUnique; i++)
+    {
+        if ((done & 1) == 0 && StringStartsWith(fn1, PathData[i].Path)) {
+            done |= 1;
+            RemoveSubstring(fn1, PathData[i].Path);
+        }
+        if ((done & 2) == 0 && StringStartsWith(fn2, PathData[i].Path)) {
+            done |= 2;
+            RemoveSubstring(fn2, PathData[i].Path);
+        }
+        if (done == 3) break;
+    }
+    // check relative paths
+    if (_tcsicmp(fn1, fn2) != 0) return 1;
+
+    return 0;
 }
 
 //--------------------------------------------------------------------------
@@ -997,12 +1023,13 @@ static void Usage (void)
            TEXT(" -v              Verbose\n")
            TEXT(" -sigs           Show signatures calculated based on first 32k for each file\n")
            TEXT(" -rdonly         Apply to readonly files also (as opposed to skipping them)\n")
-           TEXT(" -z              Do not skip zero length files (zero length files are ignored\n")
-           TEXT("                 by default)\n")
+           TEXT(" -z              Do not skip zero length files (they are ignored by default)\n")
            TEXT(" -u              Do not print a warning for files that cannot be read\n")
            TEXT(" -sl             Skip linked duplicates and show only unlinked ones\n")
            TEXT(" -p              Hide progress indicator (useful when redirecting to a file)\n")
            TEXT(" -j              Follow NTFS junctions and reparse points (off by default)\n")
+           TEXT(" -sn             Only files with same name are matched\n")
+           TEXT(" -sr             Only files with same relative path (including name) are matched\n")
            TEXT(" -listlink       hardlink list mode.  Not valid with -del, -bat, -hardlink,\n")
            TEXT("                 or -rdonly, options\n")
            TEXT(" -ign <substr>   Ignore file pattern, eg. .bak or .tmp (repeatable)\n")
@@ -1112,8 +1139,9 @@ int _tmain (int argc, TCHAR **argv)
         arg = argv[argn];
         if (indexFirstRef == 0 && !_tcscmp(arg, TEXT("-ref"))) indexFirstRef = argn;
         if (indexFirstRef > 0 && (!_tcscmp(arg, TEXT("-bat")) || !_tcscmp(arg, TEXT("-v")) || !_tcscmp(arg, TEXT("-sigs")) || !_tcscmp(arg, TEXT("-hardlink")) ||
-            !_tcscmp(arg, TEXT("-del")) || !_tcscmp(arg, TEXT("-rdonly")) || !_tcscmp(arg, TEXT("-listlink")) || !_tcscmp(arg, TEXT("-z")) || !_tcscmp(arg, TEXT("-u")) ||
-            !_tcscmp(arg, TEXT("-sl")) || !_tcscmp(arg, TEXT("-p")) || !_tcscmp(arg, TEXT("-j")) || !_tcscmp(arg, TEXT("-ign"))) && argn > indexFirstRef) {
+            !_tcscmp(arg, TEXT("-del")) || !_tcscmp(arg, TEXT("-rdonly")) || !_tcscmp(arg, TEXT("-listlink")) || !_tcscmp(arg, TEXT("-z")) ||
+            !_tcscmp(arg, TEXT("-u")) || !_tcscmp(arg, TEXT("-sl")) || !_tcscmp(arg, TEXT("-p")) || !_tcscmp(arg, TEXT("-j")) || !_tcscmp(arg, TEXT("-ign")) ||
+            !_tcscmp(arg, TEXT("-sn")) || !_tcscmp(arg, TEXT("-sr"))) && argn > indexFirstRef) {
             _ftprintf(stderr, TEXT("Wrong order of options!  Use -h for help\n"));
             exit(EXIT_FAILURE);
         }
@@ -1158,6 +1186,10 @@ int _tmain (int argc, TCHAR **argv)
             ShowProgress = 0;
         }else if (!_tcscmp(arg,TEXT("-j"))){
             FollowReparse = 1;
+        }else if (!_tcscmp(arg, TEXT("-sn"))) {
+            if (SameNameOrRelative == 0) SameNameOrRelative = 1;
+        }else if (!_tcscmp(arg, TEXT("-sr"))) {
+            SameNameOrRelative = 2;
         }
         else if (!_tcscmp(arg, TEXT("-ign"))) {
             if (IgnorePatternsCount >= IgnorePatternsAlloc) {
@@ -1205,15 +1237,14 @@ int _tmain (int argc, TCHAR **argv)
         exit(EXIT_FAILURE);
     }
 
-    #ifdef REF_CODE
     PathUnique = 0;
-    PathAllocated = 64;
-    PathData = (TCHAR**) malloc(sizeof(TCHAR*)*PathAllocated);
+    PathAllocated = 2;
+    PathData = (PathData_t*) malloc(sizeof(PathData_t) * PathAllocated);
     if (PathData == NULL){
         _ftprintf(stderr, TEXT("Malloc failure"));
         exit(EXIT_FAILURE);
     }
-    #endif
+    memset(PathData, 0, sizeof(PathData_t) * PathAllocated);
 
     if (BatchFileName) {
 #ifdef UNICODE
