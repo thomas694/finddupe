@@ -22,6 +22,8 @@ I added the following features to finddupe:
 - performance optimizations (especially for very large amounts of files) (v1.28)
 - new option to skip linked duplicates in output list (v1.30)
 - 64-bit version for addressing more memory (for large amounts of files) (v1.33)
+- use better hash algorithm (xxHash) (v1.37)
+- options to match by name or name plus relative path (v1.37)
 
 It works for me, but some more testing is desirable.
 
@@ -29,7 +31,7 @@ I've udated the project to use Visual Studio 2019.
 
 ## Usage
 ```
-finddupe v1.32 compiled Jan 27 2024
+finddupe v1.37 compiled Jun 03 2026
 an enhanced version by thomas694 (@GH), originally by Matthias Wandel
 This program comes with ABSOLUTELY NO WARRANTY. This is free software, and you
 are welcome to redistribute it under certain conditions; view GNU GPLv3 for more.
@@ -44,12 +46,13 @@ Options:
  -v              Verbose
  -sigs           Show signatures calculated based on first 32k for each file
  -rdonly         Apply to readonly files also (as opposed to skipping them)
- -z              Do not skip zero length files (zero length files are ignored
-                 by default)
+ -z              Do not skip zero length files (they are ignored by default)
  -u              Do not print a warning for files that cannot be read
  -sl             Skip linked duplicates and show only unlinked ones
  -p              Hide progress indicator (useful when redirecting to a file)
  -j              Follow NTFS junctions and reparse points (off by default)
+ -sn             Only files with same name are matched
+ -sr             Only files with same relative path (including name) are matched
  -listlink       hardlink list mode.  Not valid with -del, -bat, -hardlink,
                  or -rdonly, options
  -ign <substr>   Ignore file pattern, eg. .bak or .tmp (repeatable)
