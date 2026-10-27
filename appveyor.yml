@@ -12,7 +12,7 @@ init:
         Update-AppveyorBuild -Version "1.0.$env:APPVEYOR_BUILD_NUMBER"
       }
 #version: 1.0.{build}
-image: Visual Studio 2019
+image: Visual Studio 2022
 configuration: Release
 platform: 
   - Win32
