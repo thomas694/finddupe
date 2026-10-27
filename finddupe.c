@@ -47,6 +47,8 @@
 //     add better hash algorithm (xxHash)
 //     add options to match by name or name plus relative path
 //     fix bug in reference path determination
+// Version 1.38  (c) Oct 2026  thomas694
+//     fix bug in batch file creation
 //
 // finddupe is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -62,7 +64,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //--------------------------------------------------------------------------
 
-#define VERSION "1.37"
+#define VERSION "1.38"
 
 #include <locale.h>
 #include <stdio.h>
@@ -211,10 +213,14 @@ void ClearProgressInd(void)
 //--------------------------------------------------------------------------
 TCHAR * EscapeBatchName(TCHAR * Name)
 {
-    static TCHAR EscName[_MAX_PATH*2];
+    static TCHAR EscNameBuffers[2][_MAX_PATH * 2];
+    static int bufIndex = 0;
+    TCHAR* EscName = EscNameBuffers[bufIndex];
+    bufIndex = (bufIndex + 1) % 2;
+
     int a,b;
     b = 0;
-    for (a=0;;){
+    for (a=0;;) {
         EscName[b++] = Name[a];
         if (Name[a] == '\0') break;
         if (Name[a] == '%') EscName[b++] = '%'; // Escape '%' with '%%' for batch files.
@@ -430,10 +436,10 @@ dont_read:
         if (!DelDuplicates){
             if (!Hardlinked && isSameVolume){
                 ftprintf(BatchFile, TEXT("fsutil hardlink create \"%s\" \"%s\"\n"),
-                    ThisFile.FileName, DupeOf.FileName);
+                    EscapeBatchName(ThisFile.FileName), EscapeBatchName(DupeOf.FileName));
                 if (IsReadonly){
                     // If original was readonly, restore that attribute
-                    ftprintf(BatchFile, TEXT("attrib +r \"%s\"\n"), ThisFile.FileName);
+                    ftprintf(BatchFile, TEXT("attrib +r \"%s\"\n"), EscapeBatchName(ThisFile.FileName));
                 }
             }
         }else{

@@ -27,11 +27,11 @@ I added the following features to finddupe:
 
 It works for me, but some more testing is desirable.
 
-I've udated the project to use Visual Studio 2019.
+I've udated the project to use Visual Studio 2022.
 
 ## Usage
 ```
-finddupe v1.37 compiled Jun 03 2026
+finddupe v1.38 compiled Oct 27 2026
 an enhanced version by thomas694 (@GH), originally by Matthias Wandel
 This program comes with ABSOLUTELY NO WARRANTY. This is free software, and you
 are welcome to redistribute it under certain conditions; view GNU GPLv3 for more.
